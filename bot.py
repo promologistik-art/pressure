@@ -142,14 +142,6 @@ def get_period_by_time():
     else:
         return "Вечер"
 
-def get_period_for_save(period):
-    period_map = {
-        "Утро": "Утро",
-        "День": "День",
-        "Вечер": "Вечер"
-    }
-    return period_map.get(period, "Вечер")
-
 # ==================== РАБОТА С EXCEL ====================
 def init_excel():
     if not os.path.exists(EXCEL_FILE):
@@ -180,27 +172,36 @@ def init_excel():
             cell.font = Font(bold=True)
             cell.alignment = Alignment(horizontal='center', vertical='center')
         
+        # Строка 1, ячейка O1 - пояснение
+        explanation = ("Систолическое («верхнее») давление показывает силу давления крови на стенки артерий при сокращении сердца, "
+                       "а диастолическое («нижнее») — давление в сосудах во время его расслабления. "
+                       "Норма составляет около 120/80 мм рт. ст. Верхнее число отражает работу сердца, а нижнее — тонус сосудов")
+        
+        ws.cell(row=1, column=15, value=explanation)
+        ws.cell(row=1, column=15).alignment = Alignment(wrap_text=True, vertical='top')
+        ws.row_dimensions[1].height = 60
+        
         # Ширина колонок
         column_widths = {
             'A': 12,   # Дата
             'B': 10,   # Время Утро
             'C': 15,   # Систолическое Утро
             'D': 16,   # Диастолическое Утро
-            'E': 6,    # Пульс Утро
+            'E': 7,    # Пульс Утро
             'F': 10,   # Время День
             'G': 15,   # Систолическое День
             'H': 16,   # Диастолическое День
-            'I': 6,    # Пульс День
+            'I': 7,    # Пульс День
             'J': 10,   # Время Вечер
             'K': 15,   # Систолическое Вечер
             'L': 16,   # Диастолическое Вечер
-            'M': 6     # Пульс Вечер
+            'M': 7,    # Пульс Вечер
+            'O': 50    # Пояснение
         }
         
         for col_letter, width in column_widths.items():
             ws.column_dimensions[col_letter].width = width
         
-        ws.row_dimensions[1].height = 25
         ws.row_dimensions[2].height = 20
         
         wb.save(EXCEL_FILE)
@@ -296,6 +297,19 @@ def get_today_report():
     return f"📊 Отчет за {today}\n\nНет данных. Добавьте измерения."
 
 # ==================== АДМИН КОМАНДЫ ====================
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("Доступ запрещён.")
+        return
+    
+    await update.message.reply_text(
+        "👑 Админ панель\n\n"
+        "Команды:\n"
+        "/users - список пользователей\n"
+        "/users_excel - выгрузить пользователей в Excel\n"
+        "/grant username дни - выдать доступ (5,7,30)"
+    )
+
 async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("Доступ запрещён.")
@@ -400,25 +414,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверяем 3-й день
     await check_and_send_3day_reminder(user_id, context.application)
     
-    if is_admin(user_id):
-        await update.message.reply_text(
-            "👑 Админ\n\n"
-            "Основные команды в меню.\n"
-            "Админ команды:\n"
-            "/users - список пользователей\n"
-            "/users_excel - выгрузить пользователей\n"
-            "/grant - выдать доступ"
-        )
-    else:
-        await update.message.reply_text(
-            "📊 Журнал давления\n\n"
-            "Просто отправьте мне показания давления, и я сохраню их в Excel.\n\n"
-            "Форматы ввода:\n"
-            "120 80 - давление\n"
-            "120 80 68 - давление и пульс\n"
-            "120/80 - через слеш\n\n"
-            "Команды в меню: /table, /report, /help"
-        )
+    await update.message.reply_text(
+        "Я помогу вести журнал вашего артериального давления. Напишите мне свои показатели давления и пульса в формате 120 80 68, я сохраню и буду вести ваш журнал."
+    )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -435,8 +433,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 130/85 - через слеш\n\n"
         "Команды:\n"
         "/table - получить Excel файл\n"
-        "/report - отчет за сегодня\n"
-        "/remind - напоминание\n\n"
+        "/report - отчет за сегодня\n\n"
         "По вопросам и предложениям:\n"
         "Напишите администратору"
     )
@@ -460,14 +457,6 @@ async def table_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             filename="pressure_journal.xlsx",
             caption="Журнал давления"
         )
-
-async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    await update.message.reply_text(
-        "🔔 Напоминание\n\nПора измерить давление!\n\n"
-        "Просто отправьте мне показания"
-    )
 
 async def handle_pressure(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -523,10 +512,9 @@ async def handle_pressure(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Определяем период по времени
     period = get_period_by_time()
-    period_for_save = get_period_for_save(period)
     
     # Сохраняем в Excel
-    save_to_excel(user_id, period_for_save, systolic, diastolic, pulse)
+    save_to_excel(user_id, period, systolic, diastolic, pulse)
     
     period_emoji = {"Утро": "🌅", "День": "☀️", "Вечер": "🌙"}
     now = datetime.now(MSK_PLUS_1)
@@ -560,8 +548,8 @@ async def set_commands(app):
         BotCommand("start", "Главное меню"),
         BotCommand("table", "Получить Excel журнал"),
         BotCommand("report", "Отчет за сегодня"),
-        BotCommand("remind", "Напоминание"),
         BotCommand("help", "Помощь"),
+        BotCommand("admin", "Админ панель"),
     ]
     await app.bot.set_my_commands(commands)
 
@@ -575,9 +563,9 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("report", report_command))
     app.add_handler(CommandHandler("table", table_command))
-    app.add_handler(CommandHandler("remind", remind_command))
     
     # Админ команды
+    app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CommandHandler("users", admin_users))
     app.add_handler(CommandHandler("users_excel", admin_users_excel))
     app.add_handler(CommandHandler("grant", admin_grant))
