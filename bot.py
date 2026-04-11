@@ -17,9 +17,10 @@ ADMIN_ID = int(os.getenv("ADMIN_ID"))
 EXCEL_FILE = os.getenv("EXCEL_FILE", "pressure_journal.xlsx")
 USERS_DB = os.getenv("USERS_DB", "users.json")
 
-MSK = pytz.timezone('Europe/Moscow')
+# Время МСК+1 (UTC+4)
+MSK_PLUS_1 = pytz.timezone('Europe/Samara')
 
-user_period = {}
+user_last_message = {}
 
 # ==================== РАБОТА С БАЗОЙ ПОЛЬЗОВАТЕЛЕЙ ====================
 def load_users():
@@ -35,15 +36,47 @@ def save_users(users):
 def add_user(user_id, username):
     users = load_users()
     if str(user_id) not in users:
+        now = datetime.now(MSK_PLUS_1)
         users[str(user_id)] = {
             "username": username,
-            "joined": datetime.now(MSK).strftime("%d-%m-%Y %H:%M:%S"),
-            "status": "trial",
-            "trial_until": (datetime.now(MSK) + timedelta(days=3)).strftime("%d-%m-%Y"),
+            "joined": now.strftime("%d-%m-%Y %H:%M:%S"),
+            "status": "active",
+            "days_count": 1,
+            "last_reminder_sent": now.strftime("%d-%m-%Y"),
             "access_until": None
         }
         save_users(users)
         return True
+    else:
+        # Обновляем username если изменился
+        if users[str(user_id)]["username"] != username:
+            users[str(user_id)]["username"] = username
+            save_users(users)
+    return False
+
+def update_user_days(user_id):
+    users = load_users()
+    user = users.get(str(user_id))
+    if user and user["status"] == "active":
+        joined = datetime.strptime(user["joined"], "%d-%m-%Y %H:%M:%S")
+        days = (datetime.now(MSK_PLUS_1) - joined).days + 1
+        user["days_count"] = days
+        save_users(users)
+        return days
+    return 0
+
+def check_and_send_3day_reminder(user_id, context):
+    users = load_users()
+    user = users.get(str(user_id))
+    if user and user["status"] == "active":
+        joined = datetime.strptime(user["joined"], "%d-%m-%Y %H:%M:%S")
+        days = (datetime.now(MSK_PLUS_1) - joined).days + 1
+        last_reminder = user.get("last_reminder_sent", "")
+        
+        if days == 3 and last_reminder != datetime.now(MSK_PLUS_1).strftime("%d-%m-%Y"):
+            user["last_reminder_sent"] = datetime.now(MSK_PLUS_1).strftime("%d-%m-%Y")
+            save_users(users)
+            return True
     return False
 
 def check_access(user_id):
@@ -55,23 +88,19 @@ def check_access(user_id):
     if user["status"] == "admin":
         return True
     
-    if user["status"] == "trial":
-        trial_until = datetime.strptime(user["trial_until"], "%d-%m-%Y")
-        if datetime.now(MSK) <= trial_until:
-            return True
-        else:
-            user["status"] = "blocked"
-            save_users(users)
-            return False
+    if user["status"] == "active":
+        return True
     
     if user["status"] == "access":
-        access_until = datetime.strptime(user["access_until"], "%d-%m-%Y")
-        if datetime.now(MSK) <= access_until:
-            return True
-        else:
-            user["status"] = "blocked"
-            save_users(users)
-            return False
+        if user.get("access_until"):
+            access_until = datetime.strptime(user["access_until"], "%d-%m-%Y")
+            if datetime.now(MSK_PLUS_1) <= access_until:
+                return True
+            else:
+                user["status"] = "blocked"
+                save_users(users)
+                return False
+        return True
     
     return False
 
@@ -80,7 +109,7 @@ def grant_access(user_id, days):
     user = users.get(str(user_id))
     if user:
         user["status"] = "access"
-        user["access_until"] = (datetime.now(MSK) + timedelta(days=days)).strftime("%d-%m-%Y")
+        user["access_until"] = (datetime.now(MSK_PLUS_1) + timedelta(days=days)).strftime("%d-%m-%Y")
         save_users(users)
         return True
     return False
@@ -92,6 +121,34 @@ def get_all_users():
     users = load_users()
     return users
 
+# ==================== ОПРЕДЕЛЕНИЕ ПЕРИОДА ПО ВРЕМЕНИ ====================
+def get_period_by_time():
+    now = datetime.now(MSK_PLUS_1)
+    hour = now.hour
+    
+    if 6 <= hour < 12:
+        return "Утро"
+    elif 12 <= hour < 18:
+        return "День"
+    else:
+        return "Вечер"
+
+def get_period_for_save(period):
+    period_map = {
+        "Утро": "Утро",
+        "День": "День",
+        "Вечер": "Вечер"
+    }
+    return period_map.get(period, "Вечер")
+
+def get_period_col_name(period):
+    col_map = {
+        "Утро": "Утро",
+        "День": "День",
+        "Вечер": "Вечер"
+    }
+    return col_map.get(period, "Вечер")
+
 # ==================== РАБОТА С EXCEL ====================
 def init_excel():
     if not os.path.exists(EXCEL_FILE):
@@ -101,10 +158,10 @@ def init_excel():
         
         ws = wb.create_sheet("Давление")
         
-        # Строка 1: только B1=утро, F1=обед, J1=вечер
-        ws.cell(row=1, column=2, value="утро")  # B1
-        ws.cell(row=1, column=6, value="обед")  # F1
-        ws.cell(row=1, column=10, value="вечер") # J1
+        # Строка 1: B1=Утро, F1=День, J1=Вечер
+        ws.cell(row=1, column=2, value="Утро")
+        ws.cell(row=1, column=6, value="День")
+        ws.cell(row=1, column=10, value="Вечер")
         
         for col in [2, 6, 10]:
             ws.cell(row=1, column=col).font = Font(bold=True)
@@ -124,9 +181,19 @@ def init_excel():
         
         # Ширина колонок
         column_widths = {
-            'A': 12, 'B': 10, 'C': 14, 'D': 14, 'E': 8,
-            'F': 10, 'G': 14, 'H': 14, 'I': 8,
-            'J': 10, 'K': 14, 'L': 14, 'M': 8
+            'A': 12,   # Дата
+            'B': 10,   # Время Утро
+            'C': 15,   # Систолическое Утро
+            'D': 16,   # Диастолическое Утро
+            'E': 6,    # Пульс Утро
+            'F': 10,   # Время День
+            'G': 15,   # Систолическое День
+            'H': 16,   # Диастолическое День
+            'I': 6,    # Пульс День
+            'J': 10,   # Время Вечер
+            'K': 15,   # Систолическое Вечер
+            'L': 16,   # Диастолическое Вечер
+            'M': 6     # Пульс Вечер
         }
         
         for col_letter, width in column_widths.items():
@@ -139,14 +206,20 @@ def init_excel():
         print(f"Создан файл {EXCEL_FILE}")
 
 def save_to_excel(user_id, period, systolic, diastolic, pulse=None):
-    now = datetime.now(MSK)
-    date_str = now.strftime("%d-%m-%Y")
+    now = datetime.now(MSK_PLUS_1)
+    
+    # Если время с 00:00 до 5:59 - относим к предыдущему дню
+    if now.hour < 6:
+        date_str = (now - timedelta(days=1)).strftime("%d-%m-%Y")
+    else:
+        date_str = now.strftime("%d-%m-%Y")
+    
     time_str = now.strftime("%H:%M:%S")
     
     period_cols = {
-        'утро':   {'time_col': 2, 'systolic_col': 3, 'diastolic_col': 4, 'pulse_col': 5},
-        'обед':   {'time_col': 6, 'systolic_col': 7, 'diastolic_col': 8, 'pulse_col': 9},
-        'вечер':  {'time_col': 10, 'systolic_col': 11, 'diastolic_col': 12, 'pulse_col': 13}
+        "Утро":   {'time_col': 2, 'systolic_col': 3, 'diastolic_col': 4, 'pulse_col': 5},
+        "День":   {'time_col': 6, 'systolic_col': 7, 'diastolic_col': 8, 'pulse_col': 9},
+        "Вечер":  {'time_col': 10, 'systolic_col': 11, 'diastolic_col': 12, 'pulse_col': 13}
     }
     
     cols = period_cols[period]
@@ -183,7 +256,7 @@ def get_today_report():
     
     wb = load_workbook(EXCEL_FILE)
     ws = wb["Давление"]
-    today = datetime.now(MSK).strftime("%d-%m-%Y")
+    today = datetime.now(MSK_PLUS_1).strftime("%d-%m-%Y")
     
     for row in range(3, ws.max_row + 1):
         if ws.cell(row=row, column=1).value == today:
@@ -207,7 +280,7 @@ def get_today_report():
             report += f"   Время: {morning_time}\n"
             report += f"   Давление: {morning_sys}/{morning_dia}\n"
             report += f"   Пульс: {morning_pulse}\n\n"
-            report += f"☀️ Обед:\n"
+            report += f"☀️ День:\n"
             report += f"   Время: {afternoon_time}\n"
             report += f"   Давление: {afternoon_sys}/{afternoon_dia}\n"
             report += f"   Пульс: {afternoon_pulse}\n\n"
@@ -219,7 +292,11 @@ def get_today_report():
             
             return report
     
-    return f"📊 Отчет за {today}\n\nНет данных. Добавьте измерения через /morning, /afternoon, /evening"
+    return f"📊 Отчет за {today}\n\nНет данных. Добавьте измерения."
+
+# ==================== ОТПРАВКА СООБЩЕНИЯ АДМИНУ ====================
+async def send_to_admin(context, text):
+    await context.bot.send_message(chat_id=ADMIN_ID, text=text)
 
 # ==================== АДМИН КОМАНДЫ ====================
 async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -238,10 +315,9 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"Username: {data.get('username', '-')}\n"
         text += f"Подключен: {data.get('joined', '-')}\n"
         text += f"Статус: {data.get('status', '-')}\n"
+        text += f"Дней: {data.get('days_count', '-')}\n"
         if data.get('access_until'):
             text += f"Доступ до: {data['access_until']}\n"
-        if data.get('trial_until'):
-            text += f"Триал до: {data['trial_until']}\n"
         text += "-" * 30 + "\n"
     
     await update.message.reply_text(text)
@@ -260,7 +336,7 @@ async def admin_users_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ws = wb.active
     ws.title = "Пользователи"
     
-    headers = ["ID", "Username", "Дата подключения", "Статус", "Триал до", "Доступ до"]
+    headers = ["ID", "Username", "Дата подключения", "Статус", "Дней", "Доступ до"]
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
         ws.cell(row=1, column=col).font = Font(bold=True)
@@ -271,11 +347,11 @@ async def admin_users_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ws.cell(row=row, column=2, value=data.get('username', '-'))
         ws.cell(row=row, column=3, value=data.get('joined', '-'))
         ws.cell(row=row, column=4, value=data.get('status', '-'))
-        ws.cell(row=row, column=5, value=data.get('trial_until', '-'))
+        ws.cell(row=row, column=5, value=data.get('days_count', '-'))
         ws.cell(row=row, column=6, value=data.get('access_until', '-'))
         row += 1
     
-    filename = f"users_{datetime.now(MSK).strftime('%Y%m%d_%H%M%S')}.xlsx"
+    filename = f"users_{datetime.now(MSK_PLUS_1).strftime('%Y%m%d_%H%M%S')}.xlsx"
     wb.save(filename)
     
     with open(filename, 'rb') as f:
@@ -317,100 +393,82 @@ async def admin_grant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"Пользователь {username} не найден.")
 
+async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("Доступ запрещён.")
+        return
+    
+    await update.message.reply_text(
+        "Админ команды:\n"
+        "/users - список пользователей\n"
+        "/users_excel - выгрузить пользователей в Excel\n"
+        "/grant username дни - выдать доступ (5,7,30)\n\n"
+        "Основные команды доступны в меню"
+    )
+
 # ==================== ОСНОВНЫЕ КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or update.effective_user.first_name
     
+    add_user(user_id, username)
+    
+    # Проверяем 3-й день
+    if check_and_send_3day_reminder(user_id, context.application):
+        await update.message.reply_text(
+            "Вы уже 3 дня пользуетесь ботом Журнал давления.\n\n"
+            "Если хотите продолжить, есть предложения или замечания, свяжитесь с админом через /help"
+        )
+    
     if is_admin(user_id):
         await update.message.reply_text(
-            "👑 Админ панель\n\n"
-            "Доступные команды:\n"
+            "👑 Админ\n\n"
+            "Основные команды в меню.\n"
+            "Админ команды:\n"
             "/users - список пользователей\n"
-            "/users_excel - выгрузить пользователей в Excel\n"
-            "/grant username дни - выдать доступ (5,7,30)\n\n"
-            "Основные команды:\n"
-            "/morning - утро\n/afternoon - обед\n/evening - вечер\n"
-            "/table - Excel журнал\n/report - отчет за сегодня\n/remind - напоминание\n/help - помощь"
-        )
-        return
-    
-    new_user = add_user(user_id, username)
-    if new_user:
-        await update.message.reply_text(
-            "Добро пожаловать!\n\n"
-            "Вам доступен 3-дневный пробный период.\n\n"
-            "Команды:\n"
-            "/morning - утреннее давление\n"
-            "/afternoon - обеденное давление\n"
-            "/evening - вечернее давление\n"
-            "/table - получить Excel журнал\n"
-            "/report - отчет за сегодня\n"
-            "/remind - напоминание\n"
-            "/help - помощь\n\n"
-            f"Пробный период: 3 дня (до {(datetime.now(MSK) + timedelta(days=3)).strftime('%d-%m-%Y')})"
-        )
-        
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=f"Новый пользователь!\n\n"
-                 f"Username: @{username}\n"
-                 f"ID: {user_id}\n"
-                 f"Дата: {datetime.now(MSK).strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                 f"Для выдачи доступа: /grant {username} 7"
+            "/users_excel - выгрузить пользователей\n"
+            "/grant - выдать доступ"
         )
     else:
-        if check_access(user_id):
-            await update.message.reply_text(
-                "Бот контроля давления\n\n"
-                "Команды:\n"
-                "/morning - утро\n/afternoon - обед\n/evening - вечер\n"
-                "/table - Excel журнал\n/report - отчет за сегодня\n/remind - напоминание\n/help - помощь"
-            )
-        else:
-            await update.message.reply_text(
-                "Доступ заблокирован\n\n"
-                "Ваш пробный период истек. Свяжитесь с администратором для получения доступа."
-            )
+        await update.message.reply_text(
+            "📊 Журнал давления\n\n"
+            "Просто отправьте мне показания давления, и я сохраню их в Excel.\n\n"
+            "Форматы ввода:\n"
+            "120 80 - давление\n"
+            "120 80 68 - давление и пульс\n"
+            "120/80 - через слеш\n\n"
+            "Команды в меню: /table, /report, /help"
+        )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    if not check_access(user_id) and not is_admin(user_id):
-        await update.message.reply_text("Доступ запрещён. Свяжитесь с администратором.")
-        return
-    
     await update.message.reply_text(
-        "Инструкция\n\n"
-        "1. Запись давления:\n"
-        "/morning - утро\n/afternoon - обед\n/evening - вечер\n\n"
-        "2. Форматы ввода:\n"
+        "📖 Помощь\n\n"
+        "Как пользоваться:\n"
+        "1. Отправьте показания давления в любом формате\n"
+        "2. Бот сам определит время суток (Утро 6-12, День 12-18, Вечер 18-6)\n"
+        "3. Данные сохранятся в Excel\n\n"
+        "Форматы ввода:\n"
         "• 130 85 - давление\n"
         "• 130 85 72 - давление и пульс\n"
         "• 130/85 - через слеш\n\n"
-        "3. Получение данных:\n"
-        "/table - Excel файл\n/report - отчет за сегодня\n\n"
-        "4. Напоминания:\n"
-        "Автоматические в 8:00, 14:00, 20:00 МСК\n"
-        "/remind - ручное напоминание"
+        "Команды:\n"
+        "/table - получить Excel файл\n"
+        "/report - отчет за сегодня\n"
+        "/remind - напоминание\n\n"
+        "По вопросам и предложениям:\n"
+        "Напишите администратору"
     )
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
-    if not check_access(user_id) and not is_admin(user_id):
-        await update.message.reply_text("Доступ запрещён.")
-        return
     
     report = get_today_report()
     await update.message.reply_text(report)
 
 async def table_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
-    if not check_access(user_id) and not is_admin(user_id):
-        await update.message.reply_text("Доступ запрещён.")
-        return
     
     if not os.path.exists(EXCEL_FILE):
         await update.message.reply_text("Журнал пуст.")
@@ -426,57 +484,36 @@ async def table_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    if not check_access(user_id) and not is_admin(user_id):
-        await update.message.reply_text("Доступ запрещён.")
-        return
-    
     await update.message.reply_text(
-        "Напоминание\n\nПора измерить давление!\n\n"
-        "/morning - утро\n/afternoon - обед\n/evening - вечер"
+        "🔔 Напоминание\n\nПора измерить давление!\n\n"
+        "Просто отправьте мне показания"
     )
-
-async def morning_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if not check_access(user_id) and not is_admin(user_id):
-        await update.message.reply_text("Доступ запрещён.")
-        return
-    
-    user_period[user_id] = 'утро'
-    await update.message.reply_text("Утренний замер\n\nВведите показания в формате:\n120 80 68 или 120/80")
-
-async def afternoon_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if not check_access(user_id) and not is_admin(user_id):
-        await update.message.reply_text("Доступ запрещён.")
-        return
-    
-    user_period[user_id] = 'обед'
-    await update.message.reply_text("Обеденный замер\n\nВведите показания в формате:\n120 80 68 или 120/80")
-
-async def evening_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if not check_access(user_id) and not is_admin(user_id):
-        await update.message.reply_text("Доступ запрещён.")
-        return
-    
-    user_period[user_id] = 'вечер'
-    await update.message.reply_text("Вечерний замер\n\nВведите показания в формате:\n120 80 68 или 120/80")
 
 async def handle_pressure(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    username = update.effective_user.username or update.effective_user.first_name
     
+    # Добавляем пользователя если его нет
+    add_user(user_id, username)
+    
+    # Проверяем доступ
     if not check_access(user_id) and not is_admin(user_id):
-        await update.message.reply_text("Доступ запрещён.")
+        await update.message.reply_text(
+            "Доступ временно приостановлен.\n"
+            "Свяжитесь с администратором через /help"
+        )
         return
     
-    if user_id not in user_period:
-        await update.message.reply_text("Сначала выберите /morning, /afternoon или /evening")
-        return
+    # Проверяем 3-й день
+    if check_and_send_3day_reminder(user_id, context.application):
+        await update.message.reply_text(
+            "Вы уже 3 дня пользуетесь ботом Журнал давления.\n\n"
+            "Если хотите продолжить, есть предложения или замечания, свяжитесь с админом через /help"
+        )
     
-    period = user_period[user_id]
+    # Обновляем количество дней
+    update_user_days(user_id)
+    
     text = update.message.text.strip()
     numbers = re.findall(r'\d+', text)
     
@@ -500,29 +537,44 @@ async def handle_pressure(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
     
     if not systolic or not diastolic:
-        await update.message.reply_text("Не понял. Пример: 130 85 или 130/85")
+        await update.message.reply_text(
+            "Не понял. Примеры:\n"
+            "120 80\n"
+            "120 80 68\n"
+            "120/80"
+        )
         return
     
-    save_to_excel(user_id, period, systolic, diastolic, pulse)
-    del user_period[user_id]
+    # Определяем период по времени
+    period = get_period_by_time()
+    period_for_save = get_period_for_save(period)
     
-    period_emoji = {'утро': '🌅', 'обед': '☀️', 'вечер': '🌙'}
-    now = datetime.now(MSK)
+    # Сохраняем в Excel
+    save_to_excel(user_id, period_for_save, systolic, diastolic, pulse)
+    
+    period_emoji = {"Утро": "🌅", "День": "☀️", "Вечер": "🌙"}
+    now = datetime.now(MSK_PLUS_1)
     
     await update.message.reply_text(
-        f"Записано! {period_emoji[period]} {period}: {systolic}/{diastolic}" +
+        f"✅ Записано! {period_emoji.get(period, '')} {period}: {systolic}/{diastolic}" +
         (f", пульс {pulse}" if pulse else "") +
-        f"\nДата: {now.strftime('%d-%m-%Y %H:%M:%S')}"
+        f"\n📅 {now.strftime('%d-%m-%Y %H:%M:%S')}"
     )
 
 async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
     users = get_all_users()
+    now_time = datetime.now(MSK_PLUS_1)
+    
+    # Отправляем напоминания только в 8:00, 14:00, 20:00
+    if now_time.hour not in [8, 14, 20]:
+        return
+    
     for uid, data in users.items():
         if check_access(int(uid)):
             try:
                 await context.bot.send_message(
                     chat_id=int(uid),
-                    text="Напоминание: пора измерить давление!\n/morning - утро\n/afternoon - обед\n/evening - вечер"
+                    text="🔔 Напоминание: пора измерить давление!\n\nПросто отправьте мне показания"
                 )
             except:
                 pass
@@ -530,10 +582,7 @@ async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
 async def set_commands(app):
     commands = [
         BotCommand("start", "Главное меню"),
-        BotCommand("morning", "Утреннее давление"),
-        BotCommand("afternoon", "Обеденное давление"),
-        BotCommand("evening", "Вечернее давление"),
-        BotCommand("table", "Получить Excel"),
+        BotCommand("table", "Получить Excel журнал"),
         BotCommand("report", "Отчет за сегодня"),
         BotCommand("remind", "Напоминание"),
         BotCommand("help", "Помощь"),
@@ -548,29 +597,30 @@ def main():
     
     app = Application.builder().token(TOKEN).build()
     
+    # Основные команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("report", report_command))
     app.add_handler(CommandHandler("table", table_command))
     app.add_handler(CommandHandler("remind", remind_command))
-    app.add_handler(CommandHandler("morning", morning_command))
-    app.add_handler(CommandHandler("afternoon", afternoon_command))
-    app.add_handler(CommandHandler("evening", evening_command))
     
+    # Админ команды
     app.add_handler(CommandHandler("users", admin_users))
     app.add_handler(CommandHandler("users_excel", admin_users_excel))
     app.add_handler(CommandHandler("grant", admin_grant))
+    app.add_handler(CommandHandler("adminhelp", admin_help))
     
+    # Обработчик текстовых сообщений (показаний)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pressure))
     
     loop.run_until_complete(set_commands(app))
     
     job_queue = app.job_queue
     if job_queue:
-        job_queue.run_daily(send_scheduled_reminder, time(5, 0))
-        job_queue.run_daily(send_scheduled_reminder, time(11, 0))
-        job_queue.run_daily(send_scheduled_reminder, time(17, 0))
-        print("Напоминания: 8:00, 14:00, 20:00 МСК")
+        job_queue.run_daily(send_scheduled_reminder, time(5, 0))   # 8:00 МСК+1
+        job_queue.run_daily(send_scheduled_reminder, time(11, 0))  # 14:00 МСК+1
+        job_queue.run_daily(send_scheduled_reminder, time(17, 0))  # 20:00 МСК+1
+        print("Напоминания: 8:00, 14:00, 20:00 (МСК+1)")
     
     print("Бот запущен")
     app.run_polling()
