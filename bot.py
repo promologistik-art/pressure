@@ -305,7 +305,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         "👑 Админ панель\n\n"
-        "Команды:\n"
+        "Доступные команды:\n"
         "/users - список пользователей\n"
         "/users_excel - выгрузить пользователей в Excel\n"
         "/grant username дни - выдать доступ (5,7,30)"
@@ -321,15 +321,15 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Нет пользователей.")
         return
     
-    text = "Список пользователей:\n\n"
+    text = "👥 Список пользователей:\n\n"
     for uid, data in users.items():
-        text += f"ID: {uid}\n"
-        text += f"Username: {data.get('username', '-')}\n"
-        text += f"Подключен: {data.get('joined', '-')}\n"
-        text += f"Статус: {data.get('status', '-')}\n"
-        text += f"Дней: {data.get('days_count', '-')}\n"
+        text += f"🆔 ID: {uid}\n"
+        text += f"📝 Username: {data.get('username', '-')}\n"
+        text += f"📅 Подключен: {data.get('joined', '-')}\n"
+        text += f"🔒 Статус: {data.get('status', '-')}\n"
+        text += f"📊 Дней: {data.get('days_count', '-')}\n"
         if data.get('access_until'):
-            text += f"Доступ до: {data['access_until']}\n"
+            text += f"⏰ Доступ до: {data['access_until']}\n"
         text += "-" * 30 + "\n"
     
     await update.message.reply_text(text)
@@ -379,7 +379,7 @@ async def admin_grant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 2:
         await update.message.reply_text(
-            "Используйте: /grant username дни\n"
+            "📝 Используйте: /grant username дни\n"
             "Дни: 5, 7, 30\n"
             "Пример: /grant john 7"
         )
@@ -389,7 +389,7 @@ async def admin_grant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     days = int(args[1])
     
     if days not in [5, 7, 30]:
-        await update.message.reply_text("Доступны дни: 5, 7, 30")
+        await update.message.reply_text("❌ Доступны дни: 5, 7, 30")
         return
     
     users = get_all_users()
@@ -401,9 +401,9 @@ async def admin_grant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if found:
         grant_access(found, days)
-        await update.message.reply_text(f"Пользователю {username} выдан доступ на {days} дней.")
+        await update.message.reply_text(f"✅ Пользователю {username} выдан доступ на {days} дней.")
     else:
-        await update.message.reply_text(f"Пользователь {username} не найден.")
+        await update.message.reply_text(f"❌ Пользователь {username} не найден.")
 
 # ==================== ОСНОВНЫЕ КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -418,17 +418,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             chat_id=ADMIN_ID,
             text=f"🆕 Новый пользователь!\n\n"
-                 f"Username: @{username}\n"
-                 f"ID: {user_id}\n"
-                 f"Дата: {now.strftime('%d-%m-%Y %H:%M:%S')}"
+                 f"👤 Username: @{username}\n"
+                 f"🆔 ID: {user_id}\n"
+                 f"📅 Дата: {now.strftime('%d-%m-%Y %H:%M:%S')}"
         )
     
     # Проверяем 3-й день
     await check_and_send_3day_reminder(user_id, context.application)
     
     await update.message.reply_text(
-        "Я помогу вести журнал вашего артериального давления. Напишите мне свои показатели давления и пульса в формате 120 80 68, я сохраню и буду вести ваш журнал.\n\n"
-        "Как пользоваться:\n"
+        "📊 Я помогу вести журнал вашего артериального давления. Напишите мне свои показатели давления и пульса в формате 120 80 68, я сохраню и буду вести ваш журнал.\n\n"
+        "📖 Как пользоваться:\n"
         "1. Отправьте показания давления в любом формате\n"
         "2. Бот сам определит время суток (Утро 6-12, День 12-18, Вечер 18-6)\n"
         "3. Данные сохранятся в базе, доступной только Вам и могут быть выгружены в Excel"
@@ -464,7 +464,7 @@ async def table_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_document(
             document=f,
             filename="pressure_journal.xlsx",
-            caption="Журнал давления"
+            caption="📊 Журнал давления"
         )
 
 async def handle_pressure(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -477,7 +477,7 @@ async def handle_pressure(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверяем доступ
     if not check_access(user_id):
         await update.message.reply_text(
-            "Доступ временно приостановлен.\n"
+            "⛔ Доступ временно приостановлен.\n"
             f"Свяжитесь с администратором @{ADMIN_USERNAME}"
         )
         return
@@ -512,7 +512,7 @@ async def handle_pressure(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not systolic or not diastolic:
         await update.message.reply_text(
-            "Не понял. Примеры:\n"
+            "❌ Не понял. Примеры:\n"
             "120 80\n"
             "120 80 68\n"
             "120/80"
@@ -562,9 +562,12 @@ async def set_commands(app):
     ]
     await app.bot.set_my_commands(commands)
     
-    # Команда /admin только для админа
+    # Дополнительные команды только для админа (появляются в меню)
     admin_commands = [
         BotCommand("admin", "Админ панель"),
+        BotCommand("users", "Список пользователей"),
+        BotCommand("users_excel", "Выгрузить пользователей в Excel"),
+        BotCommand("grant", "Выдать доступ (username дни)"),
     ]
     await app.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
 
