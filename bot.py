@@ -9,7 +9,7 @@ from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment
-
+from telegram import Update, BotCommand, BotCommandScopeChat
 load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
@@ -432,7 +432,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1. Отправьте показания давления в любом формате\n"
         "2. Бот сам определит время суток (Утро 6-12, День 12-18, Вечер 18-6)\n"
         "3. Данные сохранятся в базе, доступной только Вам и могут быть выгружены в Excel\n\n"
-        f"По вопросам и предложениям пишите администратору @{ADMIN_USERNAME}"
+        
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -554,14 +554,20 @@ async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
                 pass
 
 async def set_commands(app):
+    # Команды для всех пользователей
     commands = [
         BotCommand("start", "Главное меню"),
         BotCommand("table", "Получить Excel журнал"),
         BotCommand("report", "Отчет за сегодня"),
         BotCommand("help", "Помощь"),
-        BotCommand("admin", "Админ панель"),
     ]
     await app.bot.set_my_commands(commands)
+    
+    # Дополнительные команды только для админа
+    admin_commands = [
+        BotCommand("admin", "Админ панель"),
+    ]
+    await app.bot.set_my_commands(admin_commands, scope=telegram.BotCommandScopeChat(chat_id=ADMIN_ID))
 
 def main():
     init_excel()
