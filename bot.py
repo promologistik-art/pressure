@@ -14,6 +14,7 @@ load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "silverzen")
 EXCEL_FILE = os.getenv("EXCEL_FILE", "pressure_journal.xlsx")
 USERS_DB = os.getenv("USERS_DB", "users.json")
 
@@ -80,7 +81,7 @@ async def check_and_send_3day_reminder(user_id, app):
             try:
                 await app.bot.send_message(
                     chat_id=int(user_id),
-                    text="Вы уже 3 дня пользуетесь ботом Журнал давления.\n\nЕсли хотите продолжить, есть предложения или замечания, свяжитесь с админом через /help"
+                    text="Вы уже 3 дня пользуетесь ботом Журнал давления.\n\nЕсли хотите продолжить, есть предложения или замечания, свяжитесь с админом"
                 )
             except:
                 pass
@@ -409,18 +410,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or update.effective_user.first_name
     
-    add_user(user_id, username)
+    is_new = add_user(user_id, username)
+    
+    # Если новый пользователь, уведомляем админа
+    if is_new and not is_admin(user_id):
+        now = datetime.now(MSK_PLUS_1)
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"🆕 Новый пользователь!\n\n"
+                 f"Username: @{username}\n"
+                 f"ID: {user_id}\n"
+                 f"Дата: {now.strftime('%d-%m-%Y %H:%M:%S')}"
+        )
     
     # Проверяем 3-й день
     await check_and_send_3day_reminder(user_id, context.application)
     
     await update.message.reply_text(
-        "Я помогу вести журнал вашего артериального давления. Напишите мне свои показатели давления и пульса в формате 120 80 68, я сохраню и буду вести ваш журнал."
+        "Я помогу вести журнал вашего артериального давления. Напишите мне свои показатели давления и пульса в формате 120 80 68, я сохраню и буду вести ваш журнал.\n\n"
+        "Как пользоваться:\n"
+        "1. Отправьте показания давления в любом формате\n"
+        "2. Бот сам определит время суток (Утро 6-12, День 12-18, Вечер 18-6)\n"
+        "3. Данные сохранятся в базе, доступной только Вам и могут быть выгружены в Excel\n\n"
+        f"По вопросам и предложениям пишите администратору @{ADMIN_USERNAME}"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
     await update.message.reply_text(
         "📖 Помощь\n\n"
         "Как пользоваться:\n"
@@ -434,19 +449,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Команды:\n"
         "/table - получить Excel файл\n"
         "/report - отчет за сегодня\n\n"
-        "По вопросам и предложениям:\n"
-        "Напишите администратору"
+        f"По вопросам и предложениям пишите администратору @{ADMIN_USERNAME}"
     )
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
     report = get_today_report()
     await update.message.reply_text(report)
 
 async def table_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
     if not os.path.exists(EXCEL_FILE):
         await update.message.reply_text("Журнал пуст.")
         return
@@ -469,7 +479,7 @@ async def handle_pressure(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_access(user_id):
         await update.message.reply_text(
             "Доступ временно приостановлен.\n"
-            "Свяжитесь с администратором через /help"
+            f"Свяжитесь с администратором @{ADMIN_USERNAME}"
         )
         return
     
