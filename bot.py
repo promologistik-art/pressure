@@ -553,22 +553,30 @@ async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
                 pass
 
 async def set_commands(app):
-    # Команды для всех пользователей
-    commands = [
+    # Все команды для админа
+    admin_commands = [
         BotCommand("start", "Главное меню"),
         BotCommand("table", "Получить Excel журнал"),
         BotCommand("report", "Отчет за сегодня"),
         BotCommand("help", "Помощь"),
-    ]
-    await app.bot.set_my_commands(commands)
-    
-    # Дополнительные команды только для админа (появляются в меню)
-    admin_commands = [
         BotCommand("admin", "Админ панель"),
         BotCommand("users", "Список пользователей"),
         BotCommand("users_excel", "Выгрузить пользователей в Excel"),
         BotCommand("grant", "Выдать доступ (username дни)"),
     ]
+    
+    # Обычные команды для всех пользователей
+    default_commands = [
+        BotCommand("start", "Главное меню"),
+        BotCommand("table", "Получить Excel журнал"),
+        BotCommand("report", "Отчет за сегодня"),
+        BotCommand("help", "Помощь"),
+    ]
+    
+    # Сначала устанавливаем команды по умолчанию (для всех)
+    await app.bot.set_my_commands(default_commands)
+    
+    # Затем переопределяем команды для админа (полностью заменяем)
     await app.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
 
 def main():
