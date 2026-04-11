@@ -1,5 +1,6 @@
 import os
 import re
+import json
 from datetime import datetime, timedelta, time
 import pytz
 import asyncio
@@ -14,47 +15,107 @@ load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 EXCEL_FILE = os.getenv("EXCEL_FILE", "pressure_journal.xlsx")
+USERS_DB = os.getenv("USERS_DB", "users.json")
 
 MSK = pytz.timezone('Europe/Moscow')
 
-# Хранилище выбранного периода для пользователя
 user_period = {}
 
-# ==================== ПРОВЕРКА ПРАВ ====================
-def is_admin(update: Update) -> bool:
-    return update.effective_user.id == ADMIN_ID
+# ==================== РАБОТА С БАЗОЙ ПОЛЬЗОВАТЕЛЕЙ ====================
+def load_users():
+    if os.path.exists(USERS_DB):
+        with open(USERS_DB, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
 
-# ==================== СОЗДАНИЕ EXCEL ПО ШАБЛОНУ ====================
+def save_users(users):
+    with open(USERS_DB, 'w', encoding='utf-8') as f:
+        json.dump(users, f, ensure_ascii=False, indent=2)
+
+def add_user(user_id, username):
+    users = load_users()
+    if str(user_id) not in users:
+        users[str(user_id)] = {
+            "username": username,
+            "joined": datetime.now(MSK).strftime("%d-%m-%Y %H:%M:%S"),
+            "status": "trial",
+            "trial_until": (datetime.now(MSK) + timedelta(days=3)).strftime("%d-%m-%Y"),
+            "access_until": None
+        }
+        save_users(users)
+        return True
+    return False
+
+def check_access(user_id):
+    users = load_users()
+    user = users.get(str(user_id))
+    if not user:
+        return False
+    
+    if user["status"] == "admin":
+        return True
+    
+    if user["status"] == "trial":
+        trial_until = datetime.strptime(user["trial_until"], "%d-%m-%Y")
+        if datetime.now(MSK) <= trial_until:
+            return True
+        else:
+            user["status"] = "blocked"
+            save_users(users)
+            return False
+    
+    if user["status"] == "access":
+        access_until = datetime.strptime(user["access_until"], "%d-%m-%Y")
+        if datetime.now(MSK) <= access_until:
+            return True
+        else:
+            user["status"] = "blocked"
+            save_users(users)
+            return False
+    
+    return False
+
+def grant_access(user_id, days):
+    users = load_users()
+    user = users.get(str(user_id))
+    if user:
+        user["status"] = "access"
+        user["access_until"] = (datetime.now(MSK) + timedelta(days=days)).strftime("%d-%m-%Y")
+        save_users(users)
+        return True
+    return False
+
+def is_admin(user_id):
+    return user_id == ADMIN_ID
+
+def get_all_users():
+    users = load_users()
+    return users
+
+# ==================== РАБОТА С EXCEL ====================
 def init_excel():
-    """Создаёт Excel файл с шапкой: утро, обед, вечер"""
     if not os.path.exists(EXCEL_FILE):
         wb = Workbook()
-        
-        # Удаляем дефолтный лист
         default_sheet = wb.active
         wb.remove(default_sheet)
         
-        # Создаём основной лист
         ws = wb.create_sheet("Давление")
         
-        # === ШАПКА ===
-        # Строка 1: объединённые ячейки для "утро", "обед", "вечер"
-        ws.merge_cells('A1:E1')
-        ws['A1'] = 'утро'
-        ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
-        ws['A1'].font = Font(bold=True)
+        for col in range(1, 6):
+            cell = ws.cell(row=1, column=col, value="утро")
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(horizontal='center', vertical='center')
         
-        ws.merge_cells('F1:J1')
-        ws['F1'] = 'обед'
-        ws['F1'].alignment = Alignment(horizontal='center', vertical='center')
-        ws['F1'].font = Font(bold=True)
+        for col in range(6, 11):
+            cell = ws.cell(row=1, column=col, value="обед")
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(horizontal='center', vertical='center')
         
-        ws.merge_cells('K1:O1')
-        ws['K1'] = 'вечер'
-        ws['K1'].alignment = Alignment(horizontal='center', vertical='center')
-        ws['K1'].font = Font(bold=True)
+        for col in range(11, 16):
+            cell = ws.cell(row=1, column=col, value="вечер")
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(horizontal='center', vertical='center')
         
-        # Строка 2: подзаголовки
         headers_row2 = [
             'Дата', 'Время', 'Систолическое', 'Диастолическое', 'Пульс',
             'Время', 'Систолическое', 'Диастолическое', 'Пульс',
@@ -66,45 +127,26 @@ def init_excel():
             cell.font = Font(bold=True)
             cell.alignment = Alignment(horizontal='center', vertical='center')
         
-        # Настройка ширины колонок
         column_widths = {
-            'A': 12,  # Дата
-            'B': 10,  # Время утро
-            'C': 14,  # Систолическое утро
-            'D': 14,  # Диастолическое утро
-            'E': 8,   # Пульс утро
-            'F': 10,  # Время обед
-            'G': 14,  # Систолическое обед
-            'H': 14,  # Диастолическое обед
-            'I': 8,   # Пульс обед
-            'J': 10,  # Время вечер
-            'K': 14,  # Систолическое вечер
-            'L': 14,  # Диастолическое вечер
-            'M': 8    # Пульс вечер
+            'A': 12, 'B': 10, 'C': 14, 'D': 14, 'E': 8,
+            'F': 10, 'G': 14, 'H': 14, 'I': 8,
+            'J': 10, 'K': 14, 'L': 14, 'M': 8
         }
         
         for col_letter, width in column_widths.items():
             ws.column_dimensions[col_letter].width = width
         
-        # Высота строк
         ws.row_dimensions[1].height = 25
         ws.row_dimensions[2].height = 20
         
         wb.save(EXCEL_FILE)
-        print(f"✅ Создан файл {EXCEL_FILE} по шаблону")
+        print(f"✅ Создан файл {EXCEL_FILE}")
 
-def save_to_excel(period: str, systolic: int, diastolic: int, pulse: int = None):
-    """
-    Сохраняет показания в Excel
-    period: 'утро', 'обед', 'вечер'
-    """
+def save_to_excel(user_id, period, systolic, diastolic, pulse=None):
     now = datetime.now(MSK)
     date_str = now.strftime("%d-%m-%Y")
     time_str = now.strftime("%H:%M:%S")
     
-    # Колонки: A=1 Дата, B=2 Время утро, C=3 САД утро, D=4 ДАД утро, E=5 Пульс утро
-    #          F=6 Время обед, G=7 САД обед, H=8 ДАД обед, I=9 Пульс обед
-    #          J=10 Время вечер, K=11 САД вечер, L=12 ДАД вечер, M=13 Пульс вечер
     period_cols = {
         'утро':   {'time_col': 2, 'systolic_col': 3, 'diastolic_col': 4, 'pulse_col': 5},
         'обед':   {'time_col': 6, 'systolic_col': 7, 'diastolic_col': 8, 'pulse_col': 9},
@@ -121,19 +163,16 @@ def save_to_excel(period: str, systolic: int, diastolic: int, pulse: int = None)
         wb = load_workbook(EXCEL_FILE)
         ws = wb["Давление"]
     
-    # Ищем строку с такой же датой
     target_row = None
     for row in range(3, ws.max_row + 1):
         if ws.cell(row=row, column=1).value == date_str:
             target_row = row
             break
     
-    # Если даты нет, создаём новую строку
     if target_row is None:
         target_row = ws.max_row + 1
         ws.cell(row=target_row, column=1, value=date_str)
     
-    # Заполняем данные
     ws.cell(row=target_row, column=cols['time_col'], value=time_str)
     ws.cell(row=target_row, column=cols['systolic_col'], value=systolic)
     ws.cell(row=target_row, column=cols['diastolic_col'], value=diastolic)
@@ -142,143 +181,310 @@ def save_to_excel(period: str, systolic: int, diastolic: int, pulse: int = None)
     
     wb.save(EXCEL_FILE)
 
-# ==================== КОМАНДЫ ====================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+def get_today_report():
+    if not os.path.exists(EXCEL_FILE):
+        return None
+    
+    wb = load_workbook(EXCEL_FILE)
+    ws = wb["Давление"]
+    today = datetime.now(MSK).strftime("%d-%m-%Y")
+    
+    for row in range(3, ws.max_row + 1):
+        if ws.cell(row=row, column=1).value == today:
+            morning_time = ws.cell(row=row, column=2).value or "-"
+            morning_sys = ws.cell(row=row, column=3).value or "-"
+            morning_dia = ws.cell(row=row, column=4).value or "-"
+            morning_pulse = ws.cell(row=row, column=5).value or "-"
+            
+            afternoon_time = ws.cell(row=row, column=6).value or "-"
+            afternoon_sys = ws.cell(row=row, column=7).value or "-"
+            afternoon_dia = ws.cell(row=row, column=8).value or "-"
+            afternoon_pulse = ws.cell(row=row, column=9).value or "-"
+            
+            evening_time = ws.cell(row=row, column=10).value or "-"
+            evening_sys = ws.cell(row=row, column=11).value or "-"
+            evening_dia = ws.cell(row=row, column=12).value or "-"
+            evening_pulse = ws.cell(row=row, column=13).value or "-"
+            
+            report = f"📊 **Отчет за {today}**\n\n"
+            report += f"🌅 **Утро:**\n"
+            report += f"   Время: {morning_time}\n"
+            report += f"   Давление: {morning_sys}/{morning_dia}\n"
+            report += f"   Пульс: {morning_pulse}\n\n"
+            report += f"☀️ **Обед:**\n"
+            report += f"   Время: {afternoon_time}\n"
+            report += f"   Давление: {afternoon_sys}/{afternoon_dia}\n"
+            report += f"   Пульс: {afternoon_pulse}\n\n"
+            report += f"🌙 **Вечер:**\n"
+            report += f"   Время: {evening_time}\n"
+            report += f"   Давление: {evening_sys}/{evening_dia}\n"
+            report += f"   Пульс: {evening_pulse}\n\n"
+            report += f"📁 Для полного журнала нажмите /table"
+            
+            return report
+    
+    return f"📊 **Отчет за {today}**\n\nНет данных. Добавьте измерения через /morning, /afternoon, /evening"
+
+# ==================== АДМИН КОМАНДЫ ====================
+async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
     
-    await update.message.reply_text(
-        "🩸 **Бот контроля давления**\n\n"
-        "**Доступные команды:**\n"
-        "/morning — записать утреннее давление\n"
-        "/afternoon — записать обеденное давление\n"
-        "/evening — записать вечернее давление\n"
-        "/table — получить Excel файл с журналом\n"
-        "/remind — получить напоминание сейчас\n"
-        "/help — помощь\n\n"
-        "**Пример ввода:**\n"
-        "`130 85` — только давление\n"
-        "`130 85 72` — давление и пульс\n"
-        "`130/85` — через слеш",
-        parse_mode="Markdown"
-    )
+    users = get_all_users()
+    if not users:
+        await update.message.reply_text("📭 Нет пользователей.")
+        return
+    
+    text = "👥 **Список пользователей:**\n\n"
+    for uid, data in users.items():
+        text += f"🆔 ID: {uid}\n"
+        text += f"📝 Username: {data.get('username', '-')}\n"
+        text += f"📅 Подключен: {data.get('joined', '-')}\n"
+        text += f"🔒 Статус: {data.get('status', '-')}\n"
+        if data.get('access_until'):
+            text += f"⏰ Доступ до: {data['access_until']}\n"
+        if data.get('trial_until'):
+            text += f"🎫 Триал до: {data['trial_until']}\n"
+        text += f"{'-'*30}\n"
+    
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def admin_users_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
+        return
+    
+    users = get_all_users()
+    if not users:
+        await update.message.reply_text("📭 Нет пользователей.")
+        return
+    
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Пользователи"
+    
+    headers = ["ID", "Username", "Дата подключения", "Статус", "Триал до", "Доступ до"]
+    for col, header in enumerate(headers, 1):
+        ws.cell(row=1, column=col, value=header)
+        ws.cell(row=1, column=col).font = Font(bold=True)
+    
+    row = 2
+    for uid, data in users.items():
+        ws.cell(row=row, column=1, value=uid)
+        ws.cell(row=row, column=2, value=data.get('username', '-'))
+        ws.cell(row=row, column=3, value=data.get('joined', '-'))
+        ws.cell(row=row, column=4, value=data.get('status', '-'))
+        ws.cell(row=row, column=5, value=data.get('trial_until', '-'))
+        ws.cell(row=row, column=6, value=data.get('access_until', '-'))
+        row += 1
+    
+    filename = f"users_{datetime.now(MSK).strftime('%Y%m%d_%H%M%S')}.xlsx"
+    wb.save(filename)
+    
+    with open(filename, 'rb') as f:
+        await update.message.reply_document(f, filename=filename)
+    
+    os.remove(filename)
+
+async def admin_grant(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
+        return
+    
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text(
+            "❌ Используйте: `/grant username дни`\n"
+            "Дни: 5, 7, 30\n"
+            "Пример: `/grant john 7`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    username = args[0]
+    days = int(args[1])
+    
+    if days not in [5, 7, 30]:
+        await update.message.reply_text("❌ Доступны дни: 5, 7, 30")
+        return
+    
+    users = get_all_users()
+    found = None
+    for uid, data in users.items():
+        if data.get('username', '').lower() == username.lower():
+            found = uid
+            break
+    
+    if found:
+        grant_access(found, days)
+        await update.message.reply_text(f"✅ Пользователю {username} выдан доступ на {days} дней.")
+    else:
+        await update.message.reply_text(f"❌ Пользователь {username} не найден.")
+
+# ==================== ОСНОВНЫЕ КОМАНДЫ ====================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    username = update.effective_user.username or update.effective_user.first_name
+    
+    if is_admin(user_id):
+        await update.message.reply_text(
+            "👑 **Админ панель**\n\n"
+            "**Доступные команды:**\n"
+            "/users — список пользователей\n"
+            "/users_excel — выгрузить пользователей в Excel\n"
+            "/grant username дни — выдать доступ (5,7,30)\n\n"
+            "**Основные команды:**\n"
+            "/morning — утро\n/afternoon — обед\n/evening — вечер\n"
+            "/table — Excel журнал\n/report — отчет за сегодня\n/remind — напоминание\n/help — помощь",
+            parse_mode="Markdown"
+        )
+        return
+    
+    new_user = add_user(user_id, username)
+    if new_user:
+        await update.message.reply_text(
+            "🩸 **Добро пожаловать!**\n\n"
+            "Вам доступен 3-дневный пробный период.\n\n"
+            "**Команды:**\n"
+            "/morning — утреннее давление\n"
+            "/afternoon — обеденное давление\n"
+            "/evening — вечернее давление\n"
+            "/table — получить Excel журнал\n"
+            "/report — отчет за сегодня\n"
+            "/remind — напоминание\n"
+            "/help — помощь\n\n"
+            "📅 Пробный период: 3 дня"
+        )
+        
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"🆕 **Новый пользователь!**\n\n"
+                 f"👤 Username: @{username}\n"
+                 f"🆔 ID: {user_id}\n"
+                 f"📅 Дата: {datetime.now(MSK).strftime('%d-%m-%Y %H:%M:%S')}\n\n"
+                 f"Для выдачи доступа: `/grant {username} 7`",
+            parse_mode="Markdown"
+        )
+    else:
+        if check_access(user_id):
+            await update.message.reply_text(
+                "🩸 **Бот контроля давления**\n\n"
+                "**Команды:**\n"
+                "/morning — утро\n/afternoon — обед\n/evening — вечер\n"
+                "/table — Excel журнал\n/report — отчет за сегодня\n/remind — напоминание\n/help — помощь",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                "⛔ **Доступ заблокирован**\n\n"
+                "Ваш пробный период истек. Свяжитесь с администратором для получения доступа.\n\n"
+                "Контакты для связи: [напишите ваш контакт]"
+            )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    user_id = update.effective_user.id
+    
+    if not check_access(user_id) and not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён. Свяжитесь с администратором.")
         return
     
     await update.message.reply_text(
         "📖 **Инструкция**\n\n"
         "**1. Запись давления:**\n"
-        "/morning — утренний замер\n"
-        "/afternoon — обеденный замер\n"
-        "/evening — вечерний замер\n\n"
+        "/morning — утро\n/afternoon — обед\n/evening — вечер\n\n"
         "**2. Форматы ввода:**\n"
         "• `130 85` — давление\n"
         "• `130 85 72` — давление и пульс\n"
         "• `130/85` — через слеш\n\n"
         "**3. Получение данных:**\n"
-        "/table — скачать Excel файл\n\n"
+        "/table — Excel файл\n/report — отчет за сегодня\n\n"
         "**4. Напоминания:**\n"
         "Автоматические в 8:00, 14:00, 20:00 МСК\n"
-        "/remind — ручное напоминание\n\n"
-        "**Формат даты:** ДД-ММ-ГГГГ (российский)",
+        "/remind — ручное напоминание",
         parse_mode="Markdown"
     )
 
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if not check_access(user_id) and not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
+        return
+    
+    report = get_today_report()
+    await update.message.reply_text(report, parse_mode="Markdown")
+
 async def table_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    user_id = update.effective_user.id
+    
+    if not check_access(user_id) and not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
         return
     
     if not os.path.exists(EXCEL_FILE):
-        await update.message.reply_text("📭 Журнал пока пуст. Добавьте хотя бы одно измерение.")
+        await update.message.reply_text("📭 Журнал пуст.")
         return
     
     with open(EXCEL_FILE, 'rb') as f:
         await update.message.reply_document(
             document=f,
             filename="pressure_journal.xlsx",
-            caption="📊 Журнал давления\n\n📅 Формат даты: ДД-ММ-ГГГГ\n🌅 Утро | ☀️ Обед | 🌙 Вечер"
+            caption="📊 Журнал давления"
         )
 
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    user_id = update.effective_user.id
+    
+    if not check_access(user_id) and not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
         return
     
     await update.message.reply_text(
-        "🔔 **Напоминание**\n\n"
-        "Пора измерить давление!\n\n"
-        "Используйте команды:\n"
-        "/morning — утро\n"
-        "/afternoon — обед\n"
-        "/evening — вечер",
+        "🔔 **Напоминание**\n\nПора измерить давление!\n\n"
+        "/morning — утро\n/afternoon — обед\n/evening — вечер",
         parse_mode="Markdown"
     )
 
 async def morning_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    user_id = update.effective_user.id
+    
+    if not check_access(user_id) and not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
         return
     
-    user_id = update.effective_user.id
     user_period[user_id] = 'утро'
-    await update.message.reply_text(
-        "🌅 **Утренний замер**\n\n"
-        "Введите показания в формате:\n"
-        "• `130 85` — давление\n"
-        "• `130 85 72` — давление и пульс\n"
-        "• `130/85` — через слеш\n\n"
-        "Например: `120 80 68`",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text("🌅 Введите давление:\n`120 80 68`", parse_mode="Markdown")
 
 async def afternoon_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    user_id = update.effective_user.id
+    
+    if not check_access(user_id) and not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
         return
     
-    user_id = update.effective_user.id
     user_period[user_id] = 'обед'
-    await update.message.reply_text(
-        "☀️ **Обеденный замер**\n\n"
-        "Введите показания в формате:\n"
-        "• `130 85` — давление\n"
-        "• `130 85 72` — давление и пульс\n"
-        "• `130/85` — через слеш\n\n"
-        "Например: `120 80 68`",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text("☀️ Введите давление:\n`120 80 68`", parse_mode="Markdown")
 
 async def evening_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
+    user_id = update.effective_user.id
+    
+    if not check_access(user_id) and not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
         return
     
-    user_id = update.effective_user.id
     user_period[user_id] = 'вечер'
-    await update.message.reply_text(
-        "🌙 **Вечерний замер**\n\n"
-        "Введите показания в формате:\n"
-        "• `130 85` — давление\n"
-        "• `130 85 72` — давление и пульс\n"
-        "• `130/85` — через слеш\n\n"
-        "Например: `120 80 68`",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text("🌙 Введите давление:\n`120 80 68`", parse_mode="Markdown")
 
 async def handle_pressure(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-    
     user_id = update.effective_user.id
     
-    # Проверяем, выбран ли период
+    if not check_access(user_id) and not is_admin(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
+        return
+    
     if user_id not in user_period:
-        await update.message.reply_text(
-            "❌ Сначала выберите время замера.\n\n"
-            "Используйте команды:\n"
-            "/morning — утро\n"
-            "/afternoon — обед\n"
-            "/evening — вечер"
-        )
+        await update.message.reply_text("❌ Сначала выберите /morning, /afternoon или /evening")
         return
     
     period = user_period[user_id]
@@ -306,92 +512,101 @@ async def handle_pressure(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not systolic or not diastolic:
         await update.message.reply_text(
-            "❌ Не понял показания.\n\n"
-            "Форматы:\n"
-            "• `130 85`\n"
-            "• `130 85 72`\n"
-            "• `130/85`",
-            parse_mode="Markdown"
+            "❌ Не понял. Пример: `130 85` или `130/85`", parse_mode="Markdown"
         )
         return
     
-    # Сохраняем в Excel
-    save_to_excel(period, systolic, diastolic, pulse)
-    
-    # Очищаем выбранный период
+    save_to_excel(user_id, period, systolic, diastolic, pulse)
     del user_period[user_id]
     
     period_emoji = {'утро': '🌅', 'обед': '☀️', 'вечер': '🌙'}
     now = datetime.now(MSK)
     
     await update.message.reply_text(
-        f"✅ **Записано!**\n\n"
-        f"{period_emoji[period]} {period}: {systolic}/{diastolic}" + (f", пульс {pulse}" if pulse else "") + f"\n\n"
-        f"📅 {now.strftime('%d-%m-%Y')} {now.strftime('%H:%M:%S')}",
+        f"✅ {period_emoji[period]} {period}: {systolic}/{diastolic}" +
+        (f", пульс {pulse}" if pulse else "") +
+        f"\n📅 {now.strftime('%d-%m-%Y %H:%M:%S')}",
         parse_mode="Markdown"
     )
 
 async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
-    await context.bot.send_message(
-        chat_id=ADMIN_ID,
-        text="🔔 **Плановое напоминание**\n\nПора измерить давление!\n\n"
-             "Используйте команды:\n"
-             "/morning — утро\n"
-             "/afternoon — обед\n"
-             "/evening — вечер",
-        parse_mode="Markdown"
-    )
+    users = get_all_users()
+    for uid, data in users.items():
+        if check_access(int(uid)):
+            try:
+                await context.bot.send_message(
+                    chat_id=int(uid),
+                    text="🔔 Пора измерить давление!\n/morning — утро\n/afternoon — обед\n/evening — вечер",
+                    parse_mode="Markdown"
+                )
+            except:
+                pass
 
 async def set_commands(app):
-    """Устанавливает команды для кнопки меню (≡) в левом нижнем углу"""
     commands = [
         BotCommand("start", "Главное меню"),
-        BotCommand("morning", "Записать утреннее давление"),
-        BotCommand("afternoon", "Записать обеденное давление"),
-        BotCommand("evening", "Записать вечернее давление"),
-        BotCommand("table", "Получить журнал Excel"),
-        BotCommand("remind", "Напоминание измерить давление"),
+        BotCommand("morning", "Утреннее давление"),
+        BotCommand("afternoon", "Обеденное давление"),
+        BotCommand("evening", "Вечернее давление"),
+        BotCommand("table", "Получить Excel"),
+        BotCommand("report", "Отчет за сегодня"),
+        BotCommand("remind", "Напоминание"),
         BotCommand("help", "Помощь"),
     ]
     await app.bot.set_my_commands(commands)
 
-# ==================== ЗАПУСК ====================
+async def set_admin_commands(app):
+    admin_commands = [
+        BotCommand("start", "Главное меню"),
+        BotCommand("users", "Список пользователей"),
+        BotCommand("users_excel", "Выгрузить пользователей"),
+        BotCommand("grant", "Выдать доступ (username дни)"),
+        BotCommand("morning", "Утреннее давление"),
+        BotCommand("afternoon", "Обеденное давление"),
+        BotCommand("evening", "Вечернее давление"),
+        BotCommand("table", "Получить Excel"),
+        BotCommand("report", "Отчет за сегодня"),
+        BotCommand("remind", "Напоминание"),
+        BotCommand("help", "Помощь"),
+    ]
+    await app.bot.set_my_commands(admin_commands)
+
 def main():
     init_excel()
     
-    # Создаём новый событийный цикл
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
     app = Application.builder().token(TOKEN).build()
     
-    # Команды
+    # Основные команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("report", report_command))
     app.add_handler(CommandHandler("table", table_command))
     app.add_handler(CommandHandler("remind", remind_command))
     app.add_handler(CommandHandler("morning", morning_command))
     app.add_handler(CommandHandler("afternoon", afternoon_command))
     app.add_handler(CommandHandler("evening", evening_command))
     
-    # Обработчик текстовых сообщений (показаний)
+    # Админ команды
+    app.add_handler(CommandHandler("users", admin_users))
+    app.add_handler(CommandHandler("users_excel", admin_users_excel))
+    app.add_handler(CommandHandler("grant", admin_grant))
+    
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pressure))
     
-    # Устанавливаем команды для кнопки меню (≡)
-    loop.run_until_complete(set_commands(app))
+    # Устанавливаем команды для админа
+    loop.run_until_complete(set_admin_commands(app))
     
-    # Напоминания по МСК (8:00, 14:00, 20:00)
     job_queue = app.job_queue
     if job_queue:
-        job_queue.run_daily(send_scheduled_reminder, time=time(5, 0))   # 8:00 МСК
-        job_queue.run_daily(send_scheduled_reminder, time=time(11, 0))  # 14:00 МСК
-        job_queue.run_daily(send_scheduled_reminder, time=time(17, 0))  # 20:00 МСК
+        job_queue.run_daily(send_scheduled_reminder, time(5, 0))
+        job_queue.run_daily(send_scheduled_reminder, time(11, 0))
+        job_queue.run_daily(send_scheduled_reminder, time(17, 0))
         print("⏰ Напоминания: 8:00, 14:00, 20:00 МСК")
     
     print("🤖 Бот запущен")
-    print("📋 Команды появятся в кнопке меню (≡) в левом нижнем углу")
-    
-    # Запускаем бота
     app.run_polling()
 
 if __name__ == "__main__":
