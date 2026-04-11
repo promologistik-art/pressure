@@ -1,7 +1,6 @@
 import os
 import re
-import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time  # ← правильный импорт time
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -376,19 +375,19 @@ def main():
     app.add_handler(CommandHandler("remind", remind_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pressure))
     
-    # Настройка напоминаний (JobQueue теперь работает)
+    # Настройка напоминаний
     job_queue = app.job_queue
     if job_queue:
-        # Утро в 9:00
+        # Утро в 9:00 — используем time из импорта
         job_queue.run_daily(
             send_scheduled_reminder,
-            time=datetime.time(hour=9, minute=0),
+            time=time(9, 0),  # ← исправлено: time(9, 0) вместо datetime.time()
             days=tuple(range(7))
         )
         # Вечер в 20:00
         job_queue.run_daily(
             send_scheduled_reminder,
-            time=datetime.time(hour=20, minute=0),
+            time=time(20, 0),  # ← исправлено
             days=tuple(range(7))
         )
         print("⏰ Напоминания установлены на 9:00 и 20:00")
