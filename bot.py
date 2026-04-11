@@ -5,11 +5,11 @@ import asyncio
 from datetime import datetime, timedelta, time
 import pytz
 from dotenv import load_dotenv
-from telegram import Update, BotCommand
+from telegram import Update, BotCommand, BotCommandScopeChat
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment
-from telegram import Update, BotCommand, BotCommandScopeChat
+
 load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
@@ -430,9 +430,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Я помогу вести журнал вашего артериального давления. Напишите мне свои показатели давления и пульса в формате 120 80 68, я сохраню и буду вести ваш журнал.\n\n"
         "Как пользоваться:\n"
         "1. Отправьте показания давления в любом формате\n"
-        "2. Бот сам определит время суток (Утро 6-12, День 12-18, Вечер 18-0)\n"
-        "3. Данные сохранятся в базе, доступной только Вам и могут быть выгружены в Excel\n\n"
-        
+        "2. Бот сам определит время суток (Утро 6-12, День 12-18, Вечер 18-6)\n"
+        "3. Данные сохранятся в базе, доступной только Вам и могут быть выгружены в Excel"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -563,11 +562,11 @@ async def set_commands(app):
     ]
     await app.bot.set_my_commands(commands)
     
-    # Дополнительные команды только для админа
+    # Команда /admin только для админа
     admin_commands = [
         BotCommand("admin", "Админ панель"),
     ]
-    await app.bot.set_my_commands(admin_commands, scope=telegram.BotCommandScopeChat(chat_id=ADMIN_ID))
+    await app.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
 
 def main():
     init_excel()
