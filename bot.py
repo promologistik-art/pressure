@@ -1,9 +1,9 @@
 import os
 import re
 import json
+import asyncio
 from datetime import datetime, timedelta, time
 import pytz
-import asyncio
 from dotenv import load_dotenv
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -19,8 +19,6 @@ USERS_DB = os.getenv("USERS_DB", "users.json")
 
 # Время МСК+1 (UTC+4)
 MSK_PLUS_1 = pytz.timezone('Europe/Samara')
-
-user_last_message = {}
 
 # ==================== РАБОТА С БАЗОЙ ПОЛЬЗОВАТЕЛЕЙ ====================
 def load_users():
@@ -42,13 +40,12 @@ def add_user(user_id, username):
             "joined": now.strftime("%d-%m-%Y %H:%M:%S"),
             "status": "active",
             "days_count": 1,
-            "last_reminder_sent": now.strftime("%d-%m-%Y"),
+            "last_reminder_sent": "",
             "access_until": None
         }
         save_users(users)
         return True
     else:
-        # Обновляем username если изменился
         if users[str(user_id)]["username"] != username:
             users[str(user_id)]["username"] = username
             save_users(users)
@@ -58,24 +55,35 @@ def update_user_days(user_id):
     users = load_users()
     user = users.get(str(user_id))
     if user and user["status"] == "active":
-        joined = datetime.strptime(user["joined"], "%d-%m-%Y %H:%M:%S")
+        joined_str = user["joined"]
+        joined = datetime.strptime(joined_str, "%d-%m-%Y %H:%M:%S")
+        joined = MSK_PLUS_1.localize(joined)
         days = (datetime.now(MSK_PLUS_1) - joined).days + 1
         user["days_count"] = days
         save_users(users)
         return days
     return 0
 
-def check_and_send_3day_reminder(user_id, context):
+async def check_and_send_3day_reminder(user_id, app):
     users = load_users()
     user = users.get(str(user_id))
     if user and user["status"] == "active":
-        joined = datetime.strptime(user["joined"], "%d-%m-%Y %H:%M:%S")
+        joined_str = user["joined"]
+        joined = datetime.strptime(joined_str, "%d-%m-%Y %H:%M:%S")
+        joined = MSK_PLUS_1.localize(joined)
         days = (datetime.now(MSK_PLUS_1) - joined).days + 1
         last_reminder = user.get("last_reminder_sent", "")
         
-        if days == 3 and last_reminder != datetime.now(MSK_PLUS_1).strftime("%d-%m-%Y"):
+        if days >= 3 and last_reminder != datetime.now(MSK_PLUS_1).strftime("%d-%m-%Y"):
             user["last_reminder_sent"] = datetime.now(MSK_PLUS_1).strftime("%d-%m-%Y")
             save_users(users)
+            try:
+                await app.bot.send_message(
+                    chat_id=int(user_id),
+                    text="Вы уже 3 дня пользуетесь ботом Журнал давления.\n\nЕсли хотите продолжить, есть предложения или замечания, свяжитесь с админом через /help"
+                )
+            except:
+                pass
             return True
     return False
 
@@ -85,7 +93,7 @@ def check_access(user_id):
     if not user:
         return False
     
-    if user["status"] == "admin":
+    if str(user_id) == str(ADMIN_ID):
         return True
     
     if user["status"] == "active":
@@ -94,6 +102,7 @@ def check_access(user_id):
     if user["status"] == "access":
         if user.get("access_until"):
             access_until = datetime.strptime(user["access_until"], "%d-%m-%Y")
+            access_until = MSK_PLUS_1.localize(access_until)
             if datetime.now(MSK_PLUS_1) <= access_until:
                 return True
             else:
@@ -140,14 +149,6 @@ def get_period_for_save(period):
         "Вечер": "Вечер"
     }
     return period_map.get(period, "Вечер")
-
-def get_period_col_name(period):
-    col_map = {
-        "Утро": "Утро",
-        "День": "День",
-        "Вечер": "Вечер"
-    }
-    return col_map.get(period, "Вечер")
 
 # ==================== РАБОТА С EXCEL ====================
 def init_excel():
@@ -294,10 +295,6 @@ def get_today_report():
     
     return f"📊 Отчет за {today}\n\nНет данных. Добавьте измерения."
 
-# ==================== ОТПРАВКА СООБЩЕНИЯ АДМИНУ ====================
-async def send_to_admin(context, text):
-    await context.bot.send_message(chat_id=ADMIN_ID, text=text)
-
 # ==================== АДМИН КОМАНДЫ ====================
 async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -393,19 +390,6 @@ async def admin_grant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"Пользователь {username} не найден.")
 
-async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("Доступ запрещён.")
-        return
-    
-    await update.message.reply_text(
-        "Админ команды:\n"
-        "/users - список пользователей\n"
-        "/users_excel - выгрузить пользователей в Excel\n"
-        "/grant username дни - выдать доступ (5,7,30)\n\n"
-        "Основные команды доступны в меню"
-    )
-
 # ==================== ОСНОВНЫЕ КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -414,11 +398,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user(user_id, username)
     
     # Проверяем 3-й день
-    if check_and_send_3day_reminder(user_id, context.application):
-        await update.message.reply_text(
-            "Вы уже 3 дня пользуетесь ботом Журнал давления.\n\n"
-            "Если хотите продолжить, есть предложения или замечания, свяжитесь с админом через /help"
-        )
+    await check_and_send_3day_reminder(user_id, context.application)
     
     if is_admin(user_id):
         await update.message.reply_text(
@@ -497,7 +477,7 @@ async def handle_pressure(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user(user_id, username)
     
     # Проверяем доступ
-    if not check_access(user_id) and not is_admin(user_id):
+    if not check_access(user_id):
         await update.message.reply_text(
             "Доступ временно приостановлен.\n"
             "Свяжитесь с администратором через /help"
@@ -505,11 +485,7 @@ async def handle_pressure(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Проверяем 3-й день
-    if check_and_send_3day_reminder(user_id, context.application):
-        await update.message.reply_text(
-            "Вы уже 3 дня пользуетесь ботом Журнал давления.\n\n"
-            "Если хотите продолжить, есть предложения или замечания, свяжитесь с админом через /help"
-        )
+    await check_and_send_3day_reminder(user_id, context.application)
     
     # Обновляем количество дней
     update_user_days(user_id)
@@ -592,9 +568,6 @@ async def set_commands(app):
 def main():
     init_excel()
     
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
     app = Application.builder().token(TOKEN).build()
     
     # Основные команды
@@ -608,13 +581,14 @@ def main():
     app.add_handler(CommandHandler("users", admin_users))
     app.add_handler(CommandHandler("users_excel", admin_users_excel))
     app.add_handler(CommandHandler("grant", admin_grant))
-    app.add_handler(CommandHandler("adminhelp", admin_help))
     
     # Обработчик текстовых сообщений (показаний)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pressure))
     
-    loop.run_until_complete(set_commands(app))
+    # Устанавливаем команды для меню
+    asyncio.get_event_loop().run_until_complete(set_commands(app))
     
+    # Напоминания
     job_queue = app.job_queue
     if job_queue:
         job_queue.run_daily(send_scheduled_reminder, time(5, 0))   # 8:00 МСК+1
