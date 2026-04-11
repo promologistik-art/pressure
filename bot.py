@@ -2,6 +2,7 @@ import os
 import re
 from datetime import datetime, timedelta, time
 import pytz
+import asyncio
 from dotenv import load_dotenv
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -354,6 +355,10 @@ async def set_commands(app):
 def main():
     init_excel()
     
+    # Создаём новый событийный цикл
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     app = Application.builder().token(TOKEN).build()
     
     # Команды
@@ -368,6 +373,9 @@ def main():
     # Обработчик текстовых сообщений (показаний)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pressure))
     
+    # Устанавливаем команды для кнопки меню (≡)
+    loop.run_until_complete(set_commands(app))
+    
     # Напоминания по МСК (8:00, 14:00, 20:00)
     job_queue = app.job_queue
     if job_queue:
@@ -376,12 +384,10 @@ def main():
         job_queue.run_daily(send_scheduled_reminder, time=time(17, 0))  # 20:00 МСК
         print("⏰ Напоминания: 8:00, 14:00, 20:00 МСК")
     
-    # Устанавливаем команды для кнопки меню (≡)
-    import asyncio
-    asyncio.run(set_commands(app))
-    
     print("🤖 Бот запущен")
     print("📋 Команды появятся в кнопке меню (≡) в левом нижнем углу")
+    
+    # Запускаем бота
     app.run_polling()
 
 if __name__ == "__main__":
