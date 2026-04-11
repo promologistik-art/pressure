@@ -38,7 +38,7 @@ def init_excel():
         ws = wb.create_sheet("Давление")
         
         # === ШАПКА ===
-        # Строка 1: "утро", "обед", "вечер"
+        # Строка 1: объединённые ячейки для "утро", "обед", "вечер"
         ws.merge_cells('A1:E1')
         ws['A1'] = 'утро'
         ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
@@ -55,9 +55,11 @@ def init_excel():
         ws['K1'].font = Font(bold=True)
         
         # Строка 2: подзаголовки
-        headers_row2 = ['Дата', 'Время', 'Систолическое', 'Диастолическое', 'Пульс',
-                        'Время', 'Систолическое', 'Диастолическое', 'Пульс',
-                        'Время', 'Систолическое', 'Диастолическое', 'Пульс']
+        headers_row2 = [
+            'Дата', 'Время', 'Систолическое', 'Диастолическое', 'Пульс',
+            'Время', 'Систолическое', 'Диастолическое', 'Пульс',
+            'Время', 'Систолическое', 'Диастолическое', 'Пульс'
+        ]
         
         for col, header in enumerate(headers_row2, 1):
             cell = ws.cell(row=2, column=col, value=header)
@@ -97,14 +99,16 @@ def save_to_excel(period: str, systolic: int, diastolic: int, pulse: int = None)
     period: 'утро', 'обед', 'вечер'
     """
     now = datetime.now(MSK)
-    date_str = now.strftime("%d-%m-%Y")  # Формат: 11-04-2026
+    date_str = now.strftime("%d-%m-%Y")
     time_str = now.strftime("%H:%M:%S")
     
-    # Определяем колонки для периода
+    # Колонки: A=1 Дата, B=2 Время утро, C=3 САД утро, D=4 ДАД утро, E=5 Пульс утро
+    #          F=6 Время обед, G=7 САД обед, H=8 ДАД обед, I=9 Пульс обед
+    #          J=10 Время вечер, K=11 САД вечер, L=12 ДАД вечер, M=13 Пульс вечер
     period_cols = {
-        'утро': {'start_col': 1, 'time_col': 2, 'systolic_col': 3, 'diastolic_col': 4, 'pulse_col': 5},
-        'обед': {'start_col': 6, 'time_col': 7, 'systolic_col': 8, 'diastolic_col': 9, 'pulse_col': 10},
-        'вечер': {'start_col': 11, 'time_col': 12, 'systolic_col': 13, 'diastolic_col': 14, 'pulse_col': 15}
+        'утро':   {'time_col': 2, 'systolic_col': 3, 'diastolic_col': 4, 'pulse_col': 5},
+        'обед':   {'time_col': 6, 'systolic_col': 7, 'diastolic_col': 8, 'pulse_col': 9},
+        'вечер':  {'time_col': 10, 'systolic_col': 11, 'diastolic_col': 12, 'pulse_col': 13}
     }
     
     cols = period_cols[period]
@@ -129,7 +133,7 @@ def save_to_excel(period: str, systolic: int, diastolic: int, pulse: int = None)
         target_row = ws.max_row + 1
         ws.cell(row=target_row, column=1, value=date_str)
     
-    # Заполняем данные для периода
+    # Заполняем данные
     ws.cell(row=target_row, column=cols['time_col'], value=time_str)
     ws.cell(row=target_row, column=cols['systolic_col'], value=systolic)
     ws.cell(row=target_row, column=cols['diastolic_col'], value=diastolic)
@@ -379,7 +383,7 @@ def main():
     # Напоминания по МСК (8:00, 14:00, 20:00)
     job_queue = app.job_queue
     if job_queue:
-        job_queue.run_daily(send_scheduled_reminder, time=time(5, 0))   # 8:00 МСК (UTC+3)
+        job_queue.run_daily(send_scheduled_reminder, time=time(5, 0))   # 8:00 МСК
         job_queue.run_daily(send_scheduled_reminder, time=time(11, 0))  # 14:00 МСК
         job_queue.run_daily(send_scheduled_reminder, time=time(17, 0))  # 20:00 МСК
         print("⏰ Напоминания: 8:00, 14:00, 20:00 МСК")
