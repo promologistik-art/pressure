@@ -143,8 +143,9 @@ def get_period_by_time():
     else:
         return "Вечер"
 
-# ==================== РАБОТА С EXCEL ====================
+# ==================== РАБОТА С EXCEL (НОВАЯ ВЕРСИЯ) ====================
 def init_excel():
+    """Создаёт Excel файл с новой структурой: каждая запись в отдельной строке"""
     if not os.path.exists(EXCEL_FILE):
         wb = Workbook()
         default_sheet = wb.active
@@ -152,63 +153,35 @@ def init_excel():
         
         ws = wb.create_sheet("Давление")
         
-        # Строка 1: B1=Утро, F1=День, J1=Вечер
-        ws.cell(row=1, column=2, value="Утро")
-        ws.cell(row=1, column=6, value="День")
-        ws.cell(row=1, column=10, value="Вечер")
+        # Заголовки
+        headers = ['Дата', 'Время', 'Период', 'Верхнее', 'Нижнее', 'Пульс', 'Комментарий']
         
-        for col in [2, 6, 10]:
-            ws.cell(row=1, column=col).font = Font(bold=True)
-            ws.cell(row=1, column=col).alignment = Alignment(horizontal='center', vertical='center')
-        
-        # Строка 2: подзаголовки
-        headers_row2 = [
-            'Дата', 'Время', 'Систолическое', 'Диастолическое', 'Пульс',
-            'Время', 'Систолическое', 'Диастолическое', 'Пульс',
-            'Время', 'Систолическое', 'Диастолическое', 'Пульс'
-        ]
-        
-        for col, header in enumerate(headers_row2, 1):
-            cell = ws.cell(row=2, column=col, value=header)
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=header)
             cell.font = Font(bold=True)
             cell.alignment = Alignment(horizontal='center', vertical='center')
-        
-        # Строка 1, ячейка O1 - пояснение
-        explanation = ("Систолическое («верхнее») давление показывает силу давления крови на стенки артерий при сокращении сердца, "
-                       "а диастолическое («нижнее») — давление в сосудах во время его расслабления. "
-                       "Норма составляет около 120/80 мм рт. ст. Верхнее число отражает работу сердца, а нижнее — тонус сосудов")
-        
-        ws.cell(row=1, column=15, value=explanation)
-        ws.cell(row=1, column=15).alignment = Alignment(wrap_text=True, vertical='top')
-        ws.row_dimensions[1].height = 60
         
         # Ширина колонок
         column_widths = {
             'A': 12,   # Дата
-            'B': 10,   # Время Утро
-            'C': 15,   # Систолическое Утро
-            'D': 16,   # Диастолическое Утро
-            'E': 7,    # Пульс Утро
-            'F': 10,   # Время День
-            'G': 15,   # Систолическое День
-            'H': 16,   # Диастолическое День
-            'I': 7,    # Пульс День
-            'J': 10,   # Время Вечер
-            'K': 15,   # Систолическое Вечер
-            'L': 16,   # Диастолическое Вечер
-            'M': 7,    # Пульс Вечер
-            'O': 50    # Пояснение
+            'B': 10,   # Время
+            'C': 8,    # Период
+            'D': 10,   # Верхнее
+            'E': 10,   # Нижнее
+            'F': 8,    # Пульс
+            'G': 40    # Комментарий
         }
         
         for col_letter, width in column_widths.items():
             ws.column_dimensions[col_letter].width = width
         
-        ws.row_dimensions[2].height = 20
+        ws.row_dimensions[1].height = 20
         
         wb.save(EXCEL_FILE)
-        print(f"Создан файл {EXCEL_FILE}")
+        print(f"Создан файл {EXCEL_FILE} с новой структурой")
 
-def save_to_excel(user_id, period, systolic, diastolic, pulse=None):
+def save_to_excel(user_id, period, systolic, diastolic, pulse, comment):
+    """Сохраняет показания в Excel (каждая запись в новой строке)"""
     now = datetime.now(MSK_PLUS_1)
     
     # Если время с 00:00 до 5:59 - относим к предыдущему дню
@@ -219,14 +192,6 @@ def save_to_excel(user_id, period, systolic, diastolic, pulse=None):
     
     time_str = now.strftime("%H:%M:%S")
     
-    period_cols = {
-        "Утро":   {'time_col': 2, 'systolic_col': 3, 'diastolic_col': 4, 'pulse_col': 5},
-        "День":   {'time_col': 6, 'systolic_col': 7, 'diastolic_col': 8, 'pulse_col': 9},
-        "Вечер":  {'time_col': 10, 'systolic_col': 11, 'diastolic_col': 12, 'pulse_col': 13}
-    }
-    
-    cols = period_cols[period]
-    
     if os.path.exists(EXCEL_FILE):
         wb = load_workbook(EXCEL_FILE)
         ws = wb["Давление"]
@@ -235,21 +200,16 @@ def save_to_excel(user_id, period, systolic, diastolic, pulse=None):
         wb = load_workbook(EXCEL_FILE)
         ws = wb["Давление"]
     
-    target_row = None
-    for row in range(3, ws.max_row + 1):
-        if ws.cell(row=row, column=1).value == date_str:
-            target_row = row
-            break
+    # Находим следующую пустую строку
+    next_row = ws.max_row + 1
     
-    if target_row is None:
-        target_row = ws.max_row + 1
-        ws.cell(row=target_row, column=1, value=date_str)
-    
-    ws.cell(row=target_row, column=cols['time_col'], value=time_str)
-    ws.cell(row=target_row, column=cols['systolic_col'], value=systolic)
-    ws.cell(row=target_row, column=cols['diastolic_col'], value=diastolic)
-    if pulse:
-        ws.cell(row=target_row, column=cols['pulse_col'], value=pulse)
+    ws.cell(row=next_row, column=1, value=date_str)
+    ws.cell(row=next_row, column=2, value=time_str)
+    ws.cell(row=next_row, column=3, value=period)
+    ws.cell(row=next_row, column=4, value=systolic)
+    ws.cell(row=next_row, column=5, value=diastolic)
+    ws.cell(row=next_row, column=6, value=pulse if pulse else "")
+    ws.cell(row=next_row, column=7, value=comment if comment else "")
     
     wb.save(EXCEL_FILE)
 
@@ -261,41 +221,35 @@ def get_today_report():
     ws = wb["Давление"]
     today = datetime.now(MSK_PLUS_1).strftime("%d-%m-%Y")
     
-    for row in range(3, ws.max_row + 1):
-        if ws.cell(row=row, column=1).value == today:
-            morning_time = ws.cell(row=row, column=2).value or "-"
-            morning_sys = ws.cell(row=row, column=3).value or "-"
-            morning_dia = ws.cell(row=row, column=4).value or "-"
-            morning_pulse = ws.cell(row=row, column=5).value or "-"
-            
-            afternoon_time = ws.cell(row=row, column=6).value or "-"
-            afternoon_sys = ws.cell(row=row, column=7).value or "-"
-            afternoon_dia = ws.cell(row=row, column=8).value or "-"
-            afternoon_pulse = ws.cell(row=row, column=9).value or "-"
-            
-            evening_time = ws.cell(row=row, column=10).value or "-"
-            evening_sys = ws.cell(row=row, column=11).value or "-"
-            evening_dia = ws.cell(row=row, column=12).value or "-"
-            evening_pulse = ws.cell(row=row, column=13).value or "-"
-            
-            report = f"📊 Отчет за {today}\n\n"
-            report += f"🌅 Утро:\n"
-            report += f"   Время: {morning_time}\n"
-            report += f"   Давление: {morning_sys}/{morning_dia}\n"
-            report += f"   Пульс: {morning_pulse}\n\n"
-            report += f"☀️ День:\n"
-            report += f"   Время: {afternoon_time}\n"
-            report += f"   Давление: {afternoon_sys}/{afternoon_dia}\n"
-            report += f"   Пульс: {afternoon_pulse}\n\n"
-            report += f"🌙 Вечер:\n"
-            report += f"   Время: {evening_time}\n"
-            report += f"   Давление: {evening_sys}/{evening_dia}\n"
-            report += f"   Пульс: {evening_pulse}\n\n"
-            report += f"Для полного журнала нажмите /table"
-            
-            return report
+    report = f"📊 Отчет за {today}\n\n"
+    has_data = False
     
-    return f"📊 Отчет за {today}\n\nНет данных. Добавьте измерения."
+    for row in range(2, ws.max_row + 1):
+        date = ws.cell(row=row, column=1).value
+        if date == today:
+            has_data = True
+            time_val = ws.cell(row=row, column=2).value or "-"
+            period = ws.cell(row=row, column=3).value or "-"
+            systolic = ws.cell(row=row, column=4).value or "-"
+            diastolic = ws.cell(row=row, column=5).value or "-"
+            pulse = ws.cell(row=row, column=6).value or "-"
+            comment = ws.cell(row=row, column=7).value or ""
+            
+            period_emoji = {"Утро": "🌅", "День": "☀️", "Вечер": "🌙"}
+            emoji = period_emoji.get(period, "")
+            
+            report += f"{emoji} {period} {time_val}: {systolic}/{diastolic}"
+            if pulse != "-":
+                report += f", пульс {pulse}"
+            if comment:
+                report += f"\n   📝 {comment}"
+            report += "\n\n"
+    
+    if not has_data:
+        return f"📊 Отчет за {today}\n\nНет данных. Добавьте измерения."
+    
+    report += f"Для полного журнала нажмите /table"
+    return report
 
 # ==================== АДМИН КОМАНДЫ ====================
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -427,11 +381,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await check_and_send_3day_reminder(user_id, context.application)
     
     await update.message.reply_text(
-        "📊 Я помогу вести журнал вашего артериального давления. Напишите мне свои показатели давления и пульса в формате 120 80 68, я сохраню и буду вести ваш журнал.\n\n"
-        "📖 Как пользоваться:\n"
-        "1. Отправьте показания давления в любом формате\n"
-        "2. Бот сам определит время суток по мск+1\n"
-        "3. Данные сохранятся в базе, доступной только Вам и могут быть выгружены в Excel"
+        "📊 Я помогу вести журнал вашего артериального давления.\n\n"
+        "Напишите мне свои показатели в формате:\n"
+        "120 80 68 - давление и пульс\n"
+        "120 80 - только давление\n"
+        "120/80 - через слеш\n\n"
+        "Можно добавить комментарий:\n"
+        "120 80 68 выпил таблетку\n\n"
+        "Бот сам определит время суток (Утро, День, Вечер)\n"
+        "Каждый замер сохраняется отдельной строкой"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -439,12 +397,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 Помощь\n\n"
         "Как пользоваться:\n"
         "1. Отправьте показания давления в любом формате\n"
-        "2. Бот сам определит время суток (Утро 6-12, День 12-18, Вечер 18-6)\n"
-        "3. Данные сохранятся в Excel\n\n"
+        "2. Бот сам определит время суток (Утро, День, Вечер)\n"
+        "3. Каждый замер сохраняется отдельной строкой\n\n"
         "Форматы ввода:\n"
         "• 130 85 - давление\n"
         "• 130 85 72 - давление и пульс\n"
-        "• 130/85 - через слеш\n\n"
+        "• 130/85 - через слеш\n"
+        "• 130 85 72 выпил таблетку - с комментарием\n\n"
         "Команды:\n"
         "/table - получить Excel файл\n"
         "/report - отчет за сегодня\n\n"
@@ -489,12 +448,15 @@ async def handle_pressure(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_user_days(user_id)
     
     text = update.message.text.strip()
+    
+    # Парсим числа
     numbers = re.findall(r'\d+', text)
     
     systolic = None
     diastolic = None
     pulse = None
     
+    # Ищем давление через слеш
     slash_match = re.search(r'(\d{2,3})/(\d{2,3})', text)
     if slash_match:
         systolic = int(slash_match.group(1))
@@ -503,36 +465,47 @@ async def handle_pressure(update: Update, context: ContextTypes.DEFAULT_TYPE):
         systolic = int(numbers[0])
         diastolic = int(numbers[1])
     
-    if systolic and diastolic:
-        for num in numbers:
-            num_int = int(num)
-            if 40 <= num_int <= 150 and num_int != systolic and num_int != diastolic:
-                pulse = num_int
-                break
-    
     if not systolic or not diastolic:
         await update.message.reply_text(
             "❌ Не понял. Примеры:\n"
             "120 80\n"
             "120 80 68\n"
-            "120/80"
+            "120/80\n"
+            "120 80 68 выпил таблетку"
         )
         return
+    
+    # Ищем пульс (третье число)
+    if len(numbers) >= 3:
+        pulse = int(numbers[2])
+    
+    # Извлекаем комментарий (всё после первых трёх чисел или после двух)
+    comment = ""
+    # Удаляем все числа из текста
+    comment_text = re.sub(r'\d+', '', text)
+    # Удаляем пробелы и слеши в начале
+    comment_text = re.sub(r'^[\s/]+', '', comment_text)
+    # Если остался текст - это комментарий
+    if comment_text.strip():
+        comment = comment_text.strip()
     
     # Определяем период по времени
     period = get_period_by_time()
     
     # Сохраняем в Excel
-    save_to_excel(user_id, period, systolic, diastolic, pulse)
+    save_to_excel(user_id, period, systolic, diastolic, pulse, comment)
     
     period_emoji = {"Утро": "🌅", "День": "☀️", "Вечер": "🌙"}
     now = datetime.now(MSK_PLUS_1)
     
-    await update.message.reply_text(
-        f"✅ Записано! {period_emoji.get(period, '')} {period}: {systolic}/{diastolic}" +
-        (f", пульс {pulse}" if pulse else "") +
-        f"\n📅 {now.strftime('%d-%m-%Y %H:%M:%S')}"
-    )
+    response = f"✅ Записано! {period_emoji.get(period, '')} {period}: {systolic}/{diastolic}"
+    if pulse:
+        response += f", пульс {pulse}"
+    if comment:
+        response += f"\n📝 Комментарий: {comment}"
+    response += f"\n📅 {now.strftime('%d-%m-%Y %H:%M:%S')}"
+    
+    await update.message.reply_text(response)
 
 async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
     users = get_all_users()
