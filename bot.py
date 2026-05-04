@@ -2,6 +2,8 @@ import os
 import re
 import json
 import asyncio
+import shutil
+import zipfile
 from datetime import datetime, timedelta, time
 import pytz
 from dotenv import load_dotenv
@@ -15,7 +17,7 @@ load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "silverzen")
-EXCEL_FILE = os.getenv("EXCEL_FILE", "pressure_journal.xlsx")
+EXCEL_FILE = os.getenv("EXCEL_FILE", "medical_journal.xlsx")
 USERS_DB = os.getenv("USERS_DB", "users.json")
 
 # Время МСК+1 (UTC+4)
@@ -45,7 +47,9 @@ def add_user(user_id, username):
             "status": "active",
             "days_count": 1,
             "last_reminder_sent": "",
-            "access_until": None
+            "access_until": None,
+            "payment_info": None,
+            "payment_date": None
         }
         save_users(users)
         return True
@@ -84,7 +88,7 @@ async def check_and_send_3day_reminder(user_id, app):
             try:
                 await app.bot.send_message(
                     chat_id=int(user_id),
-                    text="Вы уже 3 дня пользуетесь ботом Журнал давления.\n\nЕсли хотите продолжить, есть предложения или замечания, свяжитесь с админом"
+                    text="Вы уже 3 дня пользуетесь ботом. Если хотите продолжить, есть предложения или замечания, свяжитесь с админом."
                 )
             except:
                 pass
@@ -148,11 +152,9 @@ def get_period_by_time():
 
 # ==================== РАБОТА С EXCEL (ОДИН ФАЙЛ, ДВА ЛИСТА) ====================
 def init_excel():
-    """Создаёт Excel файл с двумя листами: Давление и Глюкоза"""
     if not os.path.exists(EXCEL_FILE):
         wb = Workbook()
         
-        # Удаляем дефолтный лист
         default_sheet = wb.active
         wb.remove(default_sheet)
         
@@ -357,7 +359,10 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Доступные команды:\n"
         "/users - список пользователей\n"
         "/users_excel - выгрузить пользователей в Excel\n"
-        "/grant username дни - выдать доступ (5,7,30)"
+        "/grant username дни - выдать доступ (5,7,30)\n"
+        "/backup - создать резервную копию (Excel + users.json)\n"
+        "/restore - восстановить данные из zip-архива\n"
+        "/test_remind - тестовая отправка напоминаний"
     )
 
 async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -379,6 +384,8 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"📊 Дней: {data.get('days_count', '-')}\n"
         if data.get('access_until'):
             text += f"⏰ Доступ до: {data['access_until']}\n"
+        if data.get('payment_info'):
+            text += f"💳 Оплата: {data['payment_info']}\n"
         text += "-" * 30 + "\n"
     
     await update.message.reply_text(text)
@@ -397,7 +404,7 @@ async def admin_users_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ws = wb.active
     ws.title = "Пользователи"
     
-    headers = ["ID", "Username", "Дата подключения", "Статус", "Дней", "Доступ до"]
+    headers = ["ID", "Username", "Дата подключения", "Статус", "Дней", "Доступ до", "Оплата", "Дата оплаты"]
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
         ws.cell(row=1, column=col).font = Font(bold=True)
@@ -410,6 +417,8 @@ async def admin_users_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ws.cell(row=row, column=4, value=data.get('status', '-'))
         ws.cell(row=row, column=5, value=data.get('days_count', '-'))
         ws.cell(row=row, column=6, value=data.get('access_until', '-'))
+        ws.cell(row=row, column=7, value=data.get('payment_info', '-'))
+        ws.cell(row=row, column=8, value=data.get('payment_date', '-'))
         row += 1
     
     filename = f"users_{datetime.now(MSK_PLUS_1).strftime('%Y%m%d_%H%M%S')}.xlsx"
@@ -454,11 +463,150 @@ async def admin_grant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"❌ Пользователь {username} не найден.")
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Создаёт резервную копию (Excel + users.json) в zip-архиве"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("Доступ запрещён.")
+        return
+    
+    files_to_backup = []
+    if os.path.exists(EXCEL_FILE):
+        files_to_backup.append(EXCEL_FILE)
+    else:
+        await update.message.reply_text(f"❌ Файл {EXCEL_FILE} не найден.")
+        return
+    
+    if os.path.exists(USERS_DB):
+        files_to_backup.append(USERS_DB)
+    else:
+        await update.message.reply_text(f"⚠️ Файл {USERS_DB} не найден, будет создан новый при запуске.")
+    
+    timestamp = datetime.now(MSK_PLUS_1).strftime("%Y%m%d_%H%M%S")
+    zip_filename = f"backup_{timestamp}.zip"
+    
+    try:
+        with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for file in files_to_backup:
+                zipf.write(file, os.path.basename(file))
+        
+        with open(zip_filename, 'rb') as f:
+            await update.message.reply_document(
+                document=f,
+                filename=zip_filename,
+                caption=f"📦 Резервная копия данных от {datetime.now(MSK_PLUS_1).strftime('%d-%m-%Y %H:%M:%S')}\n\n"
+                        f"Содержит:\n"
+                        f"• {os.path.basename(EXCEL_FILE)} - медицинский журнал\n"
+                        f"• {os.path.basename(USERS_DB)} - база пользователей"
+            )
+        
+        os.remove(zip_filename)
+        print(f"Создана резервная копия: {zip_filename}")
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка при создании резервной копии: {e}")
+
+async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Восстанавливает данные из zip-архива (только админ)"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("Доступ запрещён.")
+        return
+    
+    await update.message.reply_text(
+        "📤 Отправьте zip-архив с резервной копией (созданный командой /backup).\n\n"
+        "⚠️ ВНИМАНИЕ: текущие данные будут ПЕРЕЗАПИСАНЫ!"
+    )
+    context.user_data['awaiting_restore'] = True
+
+async def handle_restore_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик загруженного zip-файла для восстановления"""
     if not is_admin(update.effective_user.id):
         return
-    status = "работает" if context.application.job_queue else "НЕ РАБОТАЕТ"
-    await update.message.reply_text(f"JobQueue: {status}")
+    
+    if not context.user_data.get('awaiting_restore'):
+        return
+    
+    document = update.message.document
+    if not document or not document.file_name.endswith('.zip'):
+        await update.message.reply_text("❌ Пожалуйста, отправьте zip-архив (созданный командой /backup)")
+        return
+    
+    try:
+        file = await context.bot.get_file(document.file_id)
+        
+        temp_zip = f"temp_restore_{datetime.now(MSK_PLUS_1).strftime('%Y%m%d_%H%M%S')}.zip"
+        await file.download_to_drive(temp_zip)
+        
+        extract_dir = f"extract_{datetime.now(MSK_PLUS_1).strftime('%Y%m%d_%H%M%S')}"
+        os.makedirs(extract_dir, exist_ok=True)
+        
+        with zipfile.ZipFile(temp_zip, 'r') as zipf:
+            zipf.extractall(extract_dir)
+        
+        restored_files = []
+        
+        # Восстанавливаем Excel файл
+        extracted_excel = os.path.join(extract_dir, os.path.basename(EXCEL_FILE))
+        if os.path.exists(extracted_excel):
+            wb = load_workbook(extracted_excel)
+            sheet_names = wb.sheetnames
+            
+            if "Глюкоза" not in sheet_names:
+                ws_glucose = wb.create_sheet("Глюкоза")
+                headers_glucose = ['Дата', 'Время', 'Период', 'Глюкоза', 'Тип замера', 'Комментарий']
+                for col, header in enumerate(headers_glucose, 1):
+                    cell = ws_glucose.cell(row=1, column=col, value=header)
+                    cell.font = Font(bold=True)
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                wb.save(extracted_excel)
+                print("Добавлен отсутствующий лист 'Глюкоза'")
+            
+            shutil.copy2(extracted_excel, EXCEL_FILE)
+            restored_files.append(os.path.basename(EXCEL_FILE))
+        
+        # Восстанавливаем users.json
+        extracted_users = os.path.join(extract_dir, os.path.basename(USERS_DB))
+        if os.path.exists(extracted_users):
+            shutil.copy2(extracted_users, USERS_DB)
+            restored_files.append(os.path.basename(USERS_DB))
+        
+        os.remove(temp_zip)
+        shutil.rmtree(extract_dir)
+        
+        if restored_files:
+            await update.message.reply_text(
+                f"✅ Данные восстановлены из файла {document.file_name}\n\n"
+                f"Восстановлено: {', '.join(restored_files)}"
+            )
+        else:
+            await update.message.reply_text("❌ Архив не содержит нужных файлов")
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка при восстановлении: {e}")
+    finally:
+        context.user_data['awaiting_restore'] = False
+
+async def test_remind_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Тестовая отправка напоминания всем (только админ)"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("Доступ запрещён.")
+        return
+    
+    await update.message.reply_text("🔄 Отправляю тестовые напоминания всем пользователям...")
+    
+    users = get_all_users()
+    sent = 0
+    for uid, data in users.items():
+        if check_access(int(uid)):
+            try:
+                await context.bot.send_message(
+                    chat_id=int(uid),
+                    text="🧪 ТЕСТ: Напоминание работает! Если вы это видите — бот исправен."
+                )
+                sent += 1
+            except:
+                pass
+    
+    await update.message.reply_text(f"✅ Тестовое напоминание отправлено {sent} пользователям")
 
 # ==================== ОСНОВНЫЕ КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -525,25 +673,18 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/table - Excel файл (давление и глюкоза)\n"
         "/report - отчет по давлению за сегодня\n"
         "/glucose_report - отчет по глюкозе за сегодня\n\n"
-        f"По вопросам и предложениям пишите администратору @{ADMIN_USERNAME}\n\n"
-        "📢 <a href='https://t.me/+MAuGbcnBQmgxZTIy'>Больше наших ботов в канале</a>"
+        f"📢 <a href='https://t.me/+MAuGbcnBQmgxZTIy'>Больше наших ботов в канале</a>"
     )
     
     await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     report = get_today_pressure_report()
-    if report:
-        await update.message.reply_text(report)
-    else:
-        await update.message.reply_text("📊 Журнал давления пуст.")
+    await update.message.reply_text(report)
 
 async def glucose_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     report = get_today_glucose_report()
-    if report:
-        await update.message.reply_text(report)
-    else:
-        await update.message.reply_text("📊 Журнал глюкозы пуст.")
+    await update.message.reply_text(report)
 
 async def table_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not os.path.exists(EXCEL_FILE):
@@ -574,11 +715,10 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
     
     text = update.message.text.strip()
     
-    # Ищем числа
     numbers = re.findall(r'\d+[.,]?\d*', text)
     numbers = [float(n.replace(',', '.')) for n in numbers]
     
-    # Проверяем, похоже ли на глюкозу (одно маленькое число 1-30)
+    # Проверяем на глюкозу (одно число 1-30)
     if len(numbers) == 1 and 1 <= numbers[0] <= 30:
         glucose = numbers[0]
         glucose_type = detect_glucose_type(text)
@@ -603,7 +743,7 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(response)
         return
     
-    # Иначе это давление
+    # Давление
     systolic = None
     diastolic = None
     pulse = None
@@ -652,21 +792,38 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
     await update.message.reply_text(response)
 
 async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
-    users = get_all_users()
+    """Отправляет напоминания всем активным пользователям"""
     now_time = datetime.now(MSK_PLUS_1)
+    current_hour = now_time.hour
     
-    if now_time.hour not in [8, 14, 20]:
+    if current_hour not in [8, 14, 20]:
         return
+    
+    print(f"[{now_time.strftime('%Y-%m-%d %H:%M:%S')}] Запуск напоминаний, час: {current_hour}")
+    
+    users = get_all_users()
+    sent_count = 0
+    active_count = 0
     
     for uid, data in users.items():
         if check_access(int(uid)):
+            active_count += 1
             try:
                 await context.bot.send_message(
                     chat_id=int(uid),
-                    text="🔔 Напоминание: пора измерить давление!\n\nПросто отправьте мне показания"
+                    text="🔔 Напоминание: пора измерить давление и глюкозу!\n\n"
+                         "Просто отправьте мне показания:\n"
+                         "• 120 80 - давление\n"
+                         "• 120 80 68 - давление и пульс\n"
+                         "• 5.5 - глюкоза\n"
+                         "• 5.5 натощак - глюкоза с типом замера"
                 )
-            except:
-                pass
+                sent_count += 1
+                print(f"  → Напоминание отправлено пользователю {uid}")
+            except Exception as e:
+                print(f"  ✗ Ошибка отправки пользователю {uid}: {e}")
+    
+    print(f"Активных пользователей: {active_count}, отправлено напоминаний: {sent_count}")
 
 async def set_commands(app):
     admin_commands = [
@@ -679,7 +836,9 @@ async def set_commands(app):
         BotCommand("users", "Список пользователей"),
         BotCommand("users_excel", "Выгрузить пользователей в Excel"),
         BotCommand("grant", "Выдать доступ (username дни)"),
-        BotCommand("status", "Статус бота (админ)"),
+        BotCommand("backup", "Резервная копия данных"),
+        BotCommand("restore", "Восстановить данные"),
+        BotCommand("test_remind", "Тест напоминаний"),
     ]
     
     default_commands = [
@@ -699,22 +858,27 @@ def main():
     app = Application.builder().token(TOKEN).build()
     
     if app.job_queue is None:
-        print("ВНИМАНИЕ: JobQueue не создан автоматически")
+        print("❌ ОШИБКА: JobQueue не создан! Напоминания работать не будут")
     else:
-        print("JobQueue создан успешно")
+        print("✅ JobQueue создан успешно")
+        print(f"   Текущее время сервера: {datetime.now(MSK_PLUS_1).strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"   Часовой пояс: Europe/Samara (МСК+1)")
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("report", report_command))
     app.add_handler(CommandHandler("glucose_report", glucose_report_command))
     app.add_handler(CommandHandler("table", table_command))
-    app.add_handler(CommandHandler("status", status_command))
     
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CommandHandler("users", admin_users))
     app.add_handler(CommandHandler("users_excel", admin_users_excel))
     app.add_handler(CommandHandler("grant", admin_grant))
+    app.add_handler(CommandHandler("backup", backup_command))
+    app.add_handler(CommandHandler("restore", restore_command))
+    app.add_handler(CommandHandler("test_remind", test_remind_all))
     
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_restore_file))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pressure_glucose))
     
     asyncio.get_event_loop().run_until_complete(set_commands(app))
