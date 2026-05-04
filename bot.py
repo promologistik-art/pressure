@@ -21,6 +21,9 @@ USERS_DB = os.getenv("USERS_DB", "users.json")
 # Время МСК+1 (UTC+4)
 MSK_PLUS_1 = pytz.timezone('Europe/Samara')
 
+# Типы замеров глюкозы
+GLUCOSE_TYPES = ["натощак", "через 2 часа после еды", "перед едой", "перед сном", "ночью"]
+
 # ==================== РАБОТА С БАЗОЙ ПОЛЬЗОВАТЕЛЕЙ ====================
 def load_users():
     if os.path.exists(USERS_DB):
@@ -143,48 +146,48 @@ def get_period_by_time():
     else:
         return "Вечер"
 
-# ==================== РАБОТА С EXCEL (НОВАЯ ВЕРСИЯ) ====================
+# ==================== РАБОТА С EXCEL (ОДИН ФАЙЛ, ДВА ЛИСТА) ====================
 def init_excel():
-    """Создаёт Excel файл с новой структурой: каждая запись в отдельной строке"""
+    """Создаёт Excel файл с двумя листами: Давление и Глюкоза"""
     if not os.path.exists(EXCEL_FILE):
         wb = Workbook()
+        
+        # Удаляем дефолтный лист
         default_sheet = wb.active
         wb.remove(default_sheet)
         
-        ws = wb.create_sheet("Давление")
-        
-        # Заголовки
-        headers = ['Дата', 'Время', 'Период', 'Верхнее', 'Нижнее', 'Пульс', 'Комментарий']
-        
-        for col, header in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=col, value=header)
+        # Лист 1: Давление
+        ws_pressure = wb.create_sheet("Давление")
+        headers_pressure = ['Дата', 'Время', 'Период', 'Верхнее', 'Нижнее', 'Пульс', 'Комментарий']
+        for col, header in enumerate(headers_pressure, 1):
+            cell = ws_pressure.cell(row=1, column=col, value=header)
             cell.font = Font(bold=True)
             cell.alignment = Alignment(horizontal='center', vertical='center')
         
-        # Ширина колонок
-        column_widths = {
-            'A': 12,   # Дата
-            'B': 10,   # Время
-            'C': 8,    # Период
-            'D': 10,   # Верхнее
-            'E': 10,   # Нижнее
-            'F': 8,    # Пульс
-            'G': 40    # Комментарий
-        }
+        col_widths_pressure = {'A': 12, 'B': 10, 'C': 8, 'D': 10, 'E': 10, 'F': 8, 'G': 40}
+        for col_letter, width in col_widths_pressure.items():
+            ws_pressure.column_dimensions[col_letter].width = width
+        ws_pressure.row_dimensions[1].height = 20
         
-        for col_letter, width in column_widths.items():
-            ws.column_dimensions[col_letter].width = width
+        # Лист 2: Глюкоза
+        ws_glucose = wb.create_sheet("Глюкоза")
+        headers_glucose = ['Дата', 'Время', 'Период', 'Глюкоза', 'Тип замера', 'Комментарий']
+        for col, header in enumerate(headers_glucose, 1):
+            cell = ws_glucose.cell(row=1, column=col, value=header)
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(horizontal='center', vertical='center')
         
-        ws.row_dimensions[1].height = 20
+        col_widths_glucose = {'A': 12, 'B': 10, 'C': 8, 'D': 10, 'E': 25, 'F': 40}
+        for col_letter, width in col_widths_glucose.items():
+            ws_glucose.column_dimensions[col_letter].width = width
+        ws_glucose.row_dimensions[1].height = 20
         
         wb.save(EXCEL_FILE)
-        print(f"Создан файл {EXCEL_FILE} с новой структурой")
+        print(f"Создан файл {EXCEL_FILE} с двумя листами")
 
-def save_to_excel(user_id, period, systolic, diastolic, pulse, comment):
-    """Сохраняет показания в Excel (каждая запись в новой строке)"""
+def save_pressure_to_excel(user_id, period, systolic, diastolic, pulse, comment):
     now = datetime.now(MSK_PLUS_1)
     
-    # Если время с 00:00 до 5:59 - относим к предыдущему дню
     if now.hour < 6:
         date_str = (now - timedelta(days=1)).strftime("%d-%m-%Y")
     else:
@@ -194,13 +197,14 @@ def save_to_excel(user_id, period, systolic, diastolic, pulse, comment):
     
     if os.path.exists(EXCEL_FILE):
         wb = load_workbook(EXCEL_FILE)
+        if "Давление" not in wb.sheetnames:
+            wb.create_sheet("Давление")
         ws = wb["Давление"]
     else:
         init_excel()
         wb = load_workbook(EXCEL_FILE)
         ws = wb["Давление"]
     
-    # Находим следующую пустую строку
     next_row = ws.max_row + 1
     
     ws.cell(row=next_row, column=1, value=date_str)
@@ -213,15 +217,49 @@ def save_to_excel(user_id, period, systolic, diastolic, pulse, comment):
     
     wb.save(EXCEL_FILE)
 
-def get_today_report():
+def save_glucose_to_excel(user_id, period, glucose, glucose_type, comment):
+    now = datetime.now(MSK_PLUS_1)
+    
+    if now.hour < 6:
+        date_str = (now - timedelta(days=1)).strftime("%d-%m-%Y")
+    else:
+        date_str = now.strftime("%d-%m-%Y")
+    
+    time_str = now.strftime("%H:%M:%S")
+    
+    if os.path.exists(EXCEL_FILE):
+        wb = load_workbook(EXCEL_FILE)
+        if "Глюкоза" not in wb.sheetnames:
+            wb.create_sheet("Глюкоза")
+        ws = wb["Глюкоза"]
+    else:
+        init_excel()
+        wb = load_workbook(EXCEL_FILE)
+        ws = wb["Глюкоза"]
+    
+    next_row = ws.max_row + 1
+    
+    ws.cell(row=next_row, column=1, value=date_str)
+    ws.cell(row=next_row, column=2, value=time_str)
+    ws.cell(row=next_row, column=3, value=period)
+    ws.cell(row=next_row, column=4, value=glucose)
+    ws.cell(row=next_row, column=5, value=glucose_type)
+    ws.cell(row=next_row, column=6, value=comment if comment else "")
+    
+    wb.save(EXCEL_FILE)
+
+def get_today_pressure_report():
     if not os.path.exists(EXCEL_FILE):
         return None
     
     wb = load_workbook(EXCEL_FILE)
+    if "Давление" not in wb.sheetnames:
+        return "📊 Отчет по давлению за сегодня\n\nНет данных."
+    
     ws = wb["Давление"]
     today = datetime.now(MSK_PLUS_1).strftime("%d-%m-%Y")
     
-    report = f"📊 Отчет за {today}\n\n"
+    report = f"📊 Отчет по давлению за {today}\n\n"
     has_data = False
     
     for row in range(2, ws.max_row + 1):
@@ -246,10 +284,67 @@ def get_today_report():
             report += "\n\n"
     
     if not has_data:
-        return f"📊 Отчет за {today}\n\nНет данных. Добавьте измерения."
+        return f"📊 Отчет по давлению за {today}\n\nНет данных."
     
-    report += f"Для полного журнала нажмите /table"
     return report
+
+def get_today_glucose_report():
+    if not os.path.exists(EXCEL_FILE):
+        return None
+    
+    wb = load_workbook(EXCEL_FILE)
+    if "Глюкоза" not in wb.sheetnames:
+        return "📊 Отчет по глюкозе за сегодня\n\nНет данных."
+    
+    ws = wb["Глюкоза"]
+    today = datetime.now(MSK_PLUS_1).strftime("%d-%m-%Y")
+    
+    report = f"📊 Отчет по глюкозе за {today}\n\n"
+    has_data = False
+    
+    for row in range(2, ws.max_row + 1):
+        date = ws.cell(row=row, column=1).value
+        if date == today:
+            has_data = True
+            time_val = ws.cell(row=row, column=2).value or "-"
+            period = ws.cell(row=row, column=3).value or "-"
+            glucose = ws.cell(row=row, column=4).value or "-"
+            glucose_type = ws.cell(row=row, column=5).value or "-"
+            comment = ws.cell(row=row, column=6).value or ""
+            
+            period_emoji = {"Утро": "🌅", "День": "☀️", "Вечер": "🌙"}
+            emoji = period_emoji.get(period, "")
+            
+            report += f"{emoji} {period} {time_val}: глюкоза {glucose}"
+            if glucose_type != "-":
+                report += f" ({glucose_type})"
+            if comment:
+                report += f"\n   📝 {comment}"
+            report += "\n\n"
+    
+    if not has_data:
+        return f"📊 Отчет по глюкозе за {today}\n\nНет данных."
+    
+    return report
+
+# ==================== ГЛЮКОЗА - ОПРЕДЕЛЕНИЕ ТИПА ЗАМЕРА ====================
+def detect_glucose_type(text):
+    text_lower = text.lower()
+    if "натощак" in text_lower or "на тощак" in text_lower:
+        return "натощак"
+    elif "через 2 часа" in text_lower or "после еды" in text_lower:
+        return "через 2 часа после еды"
+    elif "перед едой" in text_lower:
+        return "перед едой"
+    elif "перед сном" in text_lower:
+        return "перед сном"
+    elif "ночью" in text_lower or "ночь" in text_lower:
+        return "ночью"
+    else:
+        now = datetime.now(MSK_PLUS_1)
+        if 6 <= now.hour < 12:
+            return "натощак"
+        return "без указания"
 
 # ==================== АДМИН КОМАНДЫ ====================
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -359,6 +454,12 @@ async def admin_grant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"❌ Пользователь {username} не найден.")
 
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    status = "работает" if context.application.job_queue else "НЕ РАБОТАЕТ"
+    await update.message.reply_text(f"JobQueue: {status}")
+
 # ==================== ОСНОВНЫЕ КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -366,7 +467,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     is_new = add_user(user_id, username)
     
-    # Если новый пользователь, уведомляем админа
     if is_new and not is_admin(user_id):
         now = datetime.now(MSK_PLUS_1)
         await context.bot.send_message(
@@ -377,42 +477,73 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  f"📅 Дата: {now.strftime('%d-%m-%Y %H:%M:%S')}"
         )
     
-    # Проверяем 3-й день
     await check_and_send_3day_reminder(user_id, context.application)
     
     await update.message.reply_text(
-        "📊 Я помогу вести журнал вашего артериального давления.\n\n"
-        "Напишите мне свои показатели в формате:\n"
-        "120 80 68 - давление и пульс\n"
-        "120 80 - только давление\n"
-        "120/80 - через слеш\n\n"
-        "Можно добавить комментарий:\n"
-        "120 80 68 выпил таблетку\n\n"
-        "Бот сам определит время суток (Утро, День, Вечер)\n"
-        "Каждый замер сохраняется отдельной строкой"
+        "📊 Я помогу вести журнал вашего артериального давления и уровня глюкозы.\n\n"
+        "📝 Форматы ввода давления:\n"
+        "• 120 80 - давление\n"
+        "• 120 80 68 - давление и пульс\n"
+        "• 120 80 выпил таблетку - с комментарием\n\n"
+        "📝 Форматы ввода глюкозы:\n"
+        "• 5.5 - глюкоза (период определится автоматически)\n"
+        "• 5.5 натощак - глюкоза с типом замера\n"
+        "• 5.5 через 2 часа после еды - глюкоза с типом замера\n\n"
+        "🌅 Бот сам определит время суток (Утро, День, Вечер)\n"
+        "💾 Давление и глюкоза сохраняются в одном файле на разных листах\n\n"
+        "Команды:\n"
+        "/table - получить Excel файл (2 листа: давление и глюкоза)\n"
+        "/report - отчет по давлению за сегодня\n"
+        "/glucose_report - отчет по глюкозе за сегодня\n"
+        "/help - помощь"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    text = (
         "📖 Помощь\n\n"
         "Как пользоваться:\n"
-        "1. Отправьте показания давления в любом формате\n"
+        "1. Отправьте показания давления или глюкозы\n"
         "2. Бот сам определит время суток (Утро, День, Вечер)\n"
         "3. Каждый замер сохраняется отдельной строкой\n\n"
-        "Форматы ввода:\n"
+        "Форматы ввода давления:\n"
         "• 130 85 - давление\n"
         "• 130 85 72 - давление и пульс\n"
-        "• 130/85 - через слеш\n"
-        "• 130 85 72 выпил таблетку - с комментарием\n\n"
+        "• 130 85 выпил таблетку - с комментарием\n\n"
+        "Форматы ввода глюкозы:\n"
+        "• 5.5 - глюкоза\n"
+        "• 5.5 натощак - глюкоза с типом замера\n"
+        "• 5.5 через 2 часа после еды\n\n"
+        "Рекомендации по измерению глюкозы:\n"
+        "• Утром натощак\n"
+        "• Перед каждым приёмом пищи\n"
+        "• Через 2 часа после еды\n"
+        "• Перед сном\n\n"
+        "Целевые показатели:\n"
+        "• Натощак: 4.0–7.0 ммоль/л\n"
+        "• Через 2 часа после еды: менее 10.0 ммоль/л\n\n"
         "Команды:\n"
-        "/table - получить Excel файл\n"
-        "/report - отчет за сегодня\n\n"
-        f"По вопросам и предложениям пишите администратору @{ADMIN_USERNAME}"
+        "/table - Excel файл (давление и глюкоза)\n"
+        "/report - отчет по давлению за сегодня\n"
+        "/glucose_report - отчет по глюкозе за сегодня\n\n"
+        f"По вопросам и предложениям пишите администратору @{ADMIN_USERNAME}\n\n"
+        "📢 <a href='https://t.me/+MAuGbcnBQmgxZTIy'>Больше наших ботов в канале</a>"
     )
+    
+    await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    report = get_today_report()
-    await update.message.reply_text(report)
+    report = get_today_pressure_report()
+    if report:
+        await update.message.reply_text(report)
+    else:
+        await update.message.reply_text("📊 Журнал давления пуст.")
+
+async def glucose_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    report = get_today_glucose_report()
+    if report:
+        await update.message.reply_text(report)
+    else:
+        await update.message.reply_text("📊 Журнал глюкозы пуст.")
 
 async def table_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not os.path.exists(EXCEL_FILE):
@@ -422,78 +553,91 @@ async def table_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(EXCEL_FILE, 'rb') as f:
         await update.message.reply_document(
             document=f,
-            filename="pressure_journal.xlsx",
-            caption="📊 Журнал давления"
+            filename="medical_journal.xlsx",
+            caption="📊 Медицинский журнал (давление и глюкоза)"
         )
 
-async def handle_pressure(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or update.effective_user.first_name
     
-    # Добавляем пользователя если его нет
     add_user(user_id, username)
     
-    # Проверяем доступ
     if not check_access(user_id):
         await update.message.reply_text(
-            "⛔ Доступ временно приостановлен.\n"
-            f"Свяжитесь с администратором @{ADMIN_USERNAME}"
+            f"⛔ Доступ временно приостановлен.\nСвяжитесь с администратором @{ADMIN_USERNAME}"
         )
         return
     
-    # Проверяем 3-й день
     await check_and_send_3day_reminder(user_id, context.application)
-    
-    # Обновляем количество дней
     update_user_days(user_id)
     
     text = update.message.text.strip()
     
-    # Парсим числа
-    numbers = re.findall(r'\d+', text)
+    # Ищем числа
+    numbers = re.findall(r'\d+[.,]?\d*', text)
+    numbers = [float(n.replace(',', '.')) for n in numbers]
     
+    # Проверяем, похоже ли на глюкозу (одно маленькое число 1-30)
+    if len(numbers) == 1 and 1 <= numbers[0] <= 30:
+        glucose = numbers[0]
+        glucose_type = detect_glucose_type(text)
+        period = get_period_by_time()
+        
+        comment = re.sub(r'\d+[.,]?\d*', '', text)
+        comment = re.sub(r'натощак|через 2 часа после еды|перед едой|перед сном|ночью', '', comment, flags=re.IGNORECASE)
+        comment = re.sub(r'[\s/]+', ' ', comment).strip()
+        
+        save_glucose_to_excel(user_id, period, glucose, glucose_type, comment)
+        
+        period_emoji = {"Утро": "🌅", "День": "☀️", "Вечер": "🌙"}
+        now = datetime.now(MSK_PLUS_1)
+        
+        response = f"✅ Записано! {period_emoji.get(period, '')} {period}: глюкоза {glucose}"
+        if glucose_type != "без указания":
+            response += f" ({glucose_type})"
+        if comment:
+            response += f"\n📝 {comment}"
+        response += f"\n📅 {now.strftime('%d-%m-%Y %H:%M:%S')}"
+        
+        await update.message.reply_text(response)
+        return
+    
+    # Иначе это давление
     systolic = None
     diastolic = None
     pulse = None
     
-    # Ищем давление через слеш
     slash_match = re.search(r'(\d{2,3})/(\d{2,3})', text)
     if slash_match:
         systolic = int(slash_match.group(1))
         diastolic = int(slash_match.group(2))
+        numbers = [n for n in numbers if n not in [systolic, diastolic]]
     elif len(numbers) >= 2:
         systolic = int(numbers[0])
         diastolic = int(numbers[1])
+        numbers = numbers[2:]
     
     if not systolic or not diastolic:
         await update.message.reply_text(
             "❌ Не понял. Примеры:\n"
-            "120 80\n"
-            "120 80 68\n"
-            "120/80\n"
-            "120 80 68 выпил таблетку"
+            "120 80 - давление\n"
+            "120 80 68 - давление и пульс\n"
+            "5.5 - глюкоза\n"
+            "120 80 выпил таблетку - с комментарием"
         )
         return
     
-    # Ищем пульс (третье число)
-    if len(numbers) >= 3:
-        pulse = int(numbers[2])
+    for n in numbers:
+        if 40 <= n <= 150:
+            pulse = int(n)
+            break
     
-    # Извлекаем комментарий (всё после первых трёх чисел или после двух)
-    comment = ""
-    # Удаляем все числа из текста
-    comment_text = re.sub(r'\d+', '', text)
-    # Удаляем пробелы и слеши в начале
-    comment_text = re.sub(r'^[\s/]+', '', comment_text)
-    # Если остался текст - это комментарий
-    if comment_text.strip():
-        comment = comment_text.strip()
+    comment = re.sub(r'\d+[.,]?\d*', '', text)
+    comment = re.sub(r'[\s/]+', ' ', comment).strip()
     
-    # Определяем период по времени
     period = get_period_by_time()
-    
-    # Сохраняем в Excel
-    save_to_excel(user_id, period, systolic, diastolic, pulse, comment)
+    save_pressure_to_excel(user_id, period, systolic, diastolic, pulse, comment)
     
     period_emoji = {"Утро": "🌅", "День": "☀️", "Вечер": "🌙"}
     now = datetime.now(MSK_PLUS_1)
@@ -502,7 +646,7 @@ async def handle_pressure(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if pulse:
         response += f", пульс {pulse}"
     if comment:
-        response += f"\n📝 Комментарий: {comment}"
+        response += f"\n📝 {comment}"
     response += f"\n📅 {now.strftime('%d-%m-%Y %H:%M:%S')}"
     
     await update.message.reply_text(response)
@@ -511,7 +655,6 @@ async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
     users = get_all_users()
     now_time = datetime.now(MSK_PLUS_1)
     
-    # Отправляем напоминания только в 8:00, 14:00, 20:00
     if now_time.hour not in [8, 14, 20]:
         return
     
@@ -526,30 +669,28 @@ async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
                 pass
 
 async def set_commands(app):
-    # Все команды для админа
     admin_commands = [
         BotCommand("start", "Главное меню"),
-        BotCommand("table", "Получить Excel журнал"),
-        BotCommand("report", "Отчет за сегодня"),
+        BotCommand("table", "Excel журнал (давление+глюкоза)"),
+        BotCommand("report", "Отчет по давлению за сегодня"),
+        BotCommand("glucose_report", "Отчет по глюкозе за сегодня"),
         BotCommand("help", "Помощь"),
         BotCommand("admin", "Админ панель"),
         BotCommand("users", "Список пользователей"),
         BotCommand("users_excel", "Выгрузить пользователей в Excel"),
         BotCommand("grant", "Выдать доступ (username дни)"),
+        BotCommand("status", "Статус бота (админ)"),
     ]
     
-    # Обычные команды для всех пользователей
     default_commands = [
         BotCommand("start", "Главное меню"),
-        BotCommand("table", "Получить Excel журнал"),
-        BotCommand("report", "Отчет за сегодня"),
+        BotCommand("table", "Excel журнал (давление+глюкоза)"),
+        BotCommand("report", "Отчет по давлению за сегодня"),
+        BotCommand("glucose_report", "Отчет по глюкозе за сегодня"),
         BotCommand("help", "Помощь"),
     ]
     
-    # Сначала устанавливаем команды по умолчанию (для всех)
     await app.bot.set_my_commands(default_commands)
-    
-    # Затем переопределяем команды для админа (полностью заменяем)
     await app.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
 
 def main():
@@ -557,31 +698,35 @@ def main():
     
     app = Application.builder().token(TOKEN).build()
     
-    # Основные команды
+    if app.job_queue is None:
+        print("ВНИМАНИЕ: JobQueue не создан автоматически")
+    else:
+        print("JobQueue создан успешно")
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("report", report_command))
+    app.add_handler(CommandHandler("glucose_report", glucose_report_command))
     app.add_handler(CommandHandler("table", table_command))
+    app.add_handler(CommandHandler("status", status_command))
     
-    # Админ команды
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CommandHandler("users", admin_users))
     app.add_handler(CommandHandler("users_excel", admin_users_excel))
     app.add_handler(CommandHandler("grant", admin_grant))
     
-    # Обработчик текстовых сообщений (показаний)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pressure))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pressure_glucose))
     
-    # Устанавливаем команды для меню
     asyncio.get_event_loop().run_until_complete(set_commands(app))
     
-    # Напоминания
     job_queue = app.job_queue
     if job_queue:
-        job_queue.run_daily(send_scheduled_reminder, time(5, 0))   # 8:00 МСК+1
-        job_queue.run_daily(send_scheduled_reminder, time(11, 0))  # 14:00 МСК+1
-        job_queue.run_daily(send_scheduled_reminder, time(17, 0))  # 20:00 МСК+1
+        job_queue.run_daily(send_scheduled_reminder, time(5, 0))
+        job_queue.run_daily(send_scheduled_reminder, time(11, 0))
+        job_queue.run_daily(send_scheduled_reminder, time(17, 0))
         print("Напоминания: 8:00, 14:00, 20:00 (МСК+1)")
+    else:
+        print("ОШИБКА: job_queue не создан! Напоминания работать не будут")
     
     print("Бот запущен")
     app.run_polling()
