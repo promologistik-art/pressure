@@ -73,6 +73,10 @@ def update_user_days(user_id):
     return 0
 
 async def check_and_send_3day_reminder(user_id, app):
+    # Админа пропускаем
+    if str(user_id) == str(ADMIN_ID):
+        return False
+    
     users = load_users()
     user = users.get(str(user_id))
     if user and user["status"] == "active":
@@ -362,6 +366,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/grant username дни - выдать доступ (5,7,30)\n"
         "/backup - создать резервную копию (Excel + users.json)\n"
         "/restore - восстановить данные из zip-архива\n"
+        "/status - статус бота\n"
         "/test_remind - тестовая отправка напоминаний"
     )
 
@@ -584,6 +589,15 @@ async def handle_restore_file(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"❌ Ошибка при восстановлении: {e}")
     finally:
         context.user_data['awaiting_restore'] = False
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверка статуса бота (только админ)"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("Доступ запрещён.")
+        return
+    
+    status = "работает" if context.application.job_queue else "НЕ РАБОТАЕТ"
+    await update.message.reply_text(f"🤖 Статус бота:\n\nJobQueue: {status}")
 
 async def test_remind_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Тестовая отправка напоминания всем (только админ)"""
@@ -838,6 +852,7 @@ async def set_commands(app):
         BotCommand("grant", "Выдать доступ (username дни)"),
         BotCommand("backup", "Резервная копия данных"),
         BotCommand("restore", "Восстановить данные"),
+        BotCommand("status", "Статус бота"),
         BotCommand("test_remind", "Тест напоминаний"),
     ]
     
@@ -876,6 +891,7 @@ def main():
     app.add_handler(CommandHandler("grant", admin_grant))
     app.add_handler(CommandHandler("backup", backup_command))
     app.add_handler(CommandHandler("restore", restore_command))
+    app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("test_remind", test_remind_all))
     
     app.add_handler(MessageHandler(filters.Document.ALL, handle_restore_file))
