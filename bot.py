@@ -20,7 +20,6 @@ TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "silverzen")
 DATABASE_URL = os.getenv("DATABASE_URL")
-USERS_DB = os.getenv("USERS_DB", "users.json")
 
 # Время МСК+1 (UTC+4)
 MSK_PLUS_1 = pytz.timezone('Europe/Samara')
@@ -928,10 +927,21 @@ async def set_commands(app):
     await app.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
 
 # ==================== ЗАПУСК ====================
+def main():
+    """Запуск бота"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        loop.run_until_complete(main_async())
+    except KeyboardInterrupt:
+        print("Бот остановлен")
+    finally:
+        loop.close()
+
 async def main_async():
     global db_pool
     
-    # Инициализация БД
     await init_db()
     
     app = Application.builder().token(TOKEN).build()
@@ -972,11 +982,11 @@ async def main_async():
     else:
         print("ОШИБКА: job_queue не создан! Напоминания работать не будут")
     
-    print("Бот запущен")
+    print("🤖 Бот запущен")
+    
+    await app.initialize()
+    await app.start()
     await app.run_polling()
-
-def main():
-    asyncio.run(main_async())
 
 if __name__ == "__main__":
     main()
