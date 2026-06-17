@@ -33,12 +33,8 @@ async def init_db():
     global db_pool
     
     if db_pool is None:
-        try:
-            db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
-            print("✅ Подключение к PostgreSQL установлено")
-        except Exception as e:
-            print(f"❌ Ошибка подключения к БД: {e}")
-            raise
+        db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+        print("✅ Подключение к PostgreSQL установлено")
     
     # Создаём таблицы
     async with db_pool.acquire() as conn:
@@ -102,7 +98,7 @@ async def get_db_pool():
 async def add_user(user_id, username):
     users = await get_all_users()
     if str(user_id) not in users:
-        now = datetime.now(MSK_PLUS_1)
+        now = datetime.now(MSK_PLUS_1).replace(tzinfo=None)  # Убираем tzinfo для PostgreSQL
         async with db_pool.acquire() as conn:
             await conn.execute('''
                 INSERT INTO users (user_id, username, joined, status, days_count)
@@ -140,7 +136,7 @@ async def update_user_days(user_id):
         row = await conn.fetchrow('SELECT joined FROM users WHERE user_id = $1', user_id)
         if row:
             joined = row['joined']
-            days = (datetime.now(MSK_PLUS_1) - joined).days + 1
+            days = (datetime.now(MSK_PLUS_1).replace(tzinfo=None) - joined).days + 1
             await conn.execute('UPDATE users SET days_count = $1 WHERE user_id = $2', days, user_id)
             return days
     return 0
@@ -154,7 +150,7 @@ async def check_and_send_3day_reminder(user_id, app):
         row = await conn.fetchrow('SELECT joined, status, last_reminder_sent FROM users WHERE user_id = $1', user_id)
         if row and row['status'] == 'active':
             joined = row['joined']
-            days = (datetime.now(MSK_PLUS_1) - joined).days + 1
+            days = (datetime.now(MSK_PLUS_1).replace(tzinfo=None) - joined).days + 1
             last_reminder = row['last_reminder_sent']
             
             if days >= 3 and last_reminder != datetime.now(MSK_PLUS_1).date():
@@ -197,7 +193,7 @@ async def grant_access(user_id, days):
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow('SELECT * FROM users WHERE user_id = $1', user_id)
         if row:
-            access_until = (datetime.now(MSK_PLUS_1) + timedelta(days=days)).date()
+            access_until = (datetime.now(MSK_PLUS_1).replace(tzinfo=None) + timedelta(days=days)).date()
             await conn.execute('UPDATE users SET status = $1, access_until = $2 WHERE user_id = $3', 
                               'access', access_until, user_id)
             return True
@@ -840,7 +836,6 @@ async def handle_restore_file(update: Update, context: ContextTypes.DEFAULT_TYPE
     document = update.message.document
     if not document or not document.file_name.endswith('.sql'):
         await update.message.reply_text("❌ Пожалуйста, отправьте SQL дамп (созданный командой /backup)")
-        context.user_data['awaiting_restore'] = None
         return
     
     try:
