@@ -34,30 +34,14 @@ async def init_db():
     
     if db_pool is None:
         try:
-            for attempt in range(3):
-                try:
-                    db_pool = await asyncpg.create_pool(
-                        DATABASE_URL, 
-                        min_size=1, 
-                        max_size=5,
-                        timeout=10.0
-                    )
-                    print("✅ Подключение к PostgreSQL установлено")
-                    break
-                except Exception as e:
-                    print(f"⚠️ Попытка {attempt + 1}/3 подключения к БД: {e}")
-                    if attempt == 2:
-                        raise
-                    await asyncio.sleep(2)
+            db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+            print("✅ Подключение к PostgreSQL установлено")
         except Exception as e:
-            print(f"❌ Не удалось подключиться к БД: {e}")
+            print(f"❌ Ошибка подключения к БД: {e}")
             raise
     
+    # Создаём таблицы
     async with db_pool.acquire() as conn:
-        # Проверка соединения
-        version = await conn.fetchval('SELECT version()')
-        print(f"📊 Версия PostgreSQL: {version.split(',')[0]}")
-        
         # Таблица пользователей
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
@@ -109,13 +93,6 @@ async def init_db():
         await conn.execute('CREATE INDEX IF NOT EXISTS idx_glucose_user_id ON glucose(user_id)')
         
         print("✅ Таблицы созданы/проверены")
-
-async def close_db():
-    """Закрытие пула подключений к БД"""
-    global db_pool
-    if db_pool:
-        await db_pool.close()
-        print("✅ Подключение к PostgreSQL закрыто")
 
 async def get_db_pool():
     """Возвращает пул подключений к БД"""
@@ -246,8 +223,15 @@ async def generate_pressure_excel(user_id):
     """Генерирует Excel файл с давлением для конкретного пользователя"""
     wb = Workbook()
     
-    # Лист 1: Давление
+    # Создаем листы перед удалением дефолтного
     ws_pressure = wb.create_sheet("Давление", 0)
+    ws_glucose = wb.create_sheet("Глюкоза", 1)
+    
+    # Удаляем дефолтный лист если остался
+    if "Sheet" in wb.sheetnames:
+        del wb["Sheet"]
+    
+    # Заголовки для давления
     headers_pressure = ['Дата', 'Время', 'Период', 'Верхнее', 'Нижнее', 'Пульс', 'Комментарий']
     for col, header in enumerate(headers_pressure, 1):
         cell = ws_pressure.cell(row=1, column=col, value=header)
@@ -259,8 +243,7 @@ async def generate_pressure_excel(user_id):
         ws_pressure.column_dimensions[col_letter].width = width
     ws_pressure.row_dimensions[1].height = 20
     
-    # Лист 2: Глюкоза
-    ws_glucose = wb.create_sheet("Глюкоза", 1)
+    # Заголовки для глюкозы
     headers_glucose = ['Дата', 'Время', 'Период', 'Глюкоза', 'Тип замера', 'Комментарий']
     for col, header in enumerate(headers_glucose, 1):
         cell = ws_glucose.cell(row=1, column=col, value=header)
@@ -271,10 +254,6 @@ async def generate_pressure_excel(user_id):
     for col_letter, width in col_widths_glucose.items():
         ws_glucose.column_dimensions[col_letter].width = width
     ws_glucose.row_dimensions[1].height = 20
-    
-    # Удаляем дефолтный лист после создания нужных
-    if "Sheet" in wb.sheetnames:
-        del wb["Sheet"]
     
     # Заполняем данными из БД
     async with db_pool.acquire() as conn:
@@ -525,11 +504,7 @@ async def admin_grant(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     username = args[0]
-    try:
-        days = int(args[1])
-    except ValueError:
-        await update.message.reply_text("❌ Дни должны быть числом: 5, 7 или 30")
-        return
+    days = int(args[1])
     
     if days not in [5, 7, 30]:
         await update.message.reply_text("❌ Доступны дни: 5, 7, 30")
@@ -543,11 +518,8 @@ async def admin_grant(update: Update, context: ContextTypes.DEFAULT_TYPE):
             break
     
     if found:
-        success = await grant_access(found, days)
-        if success:
-            await update.message.reply_text(f"✅ Пользователю {username} выдан доступ на {days} дней.")
-        else:
-            await update.message.reply_text(f"❌ Не удалось выдать доступ. Возможно, пользователь не в базе данных.")
+        await grant_access(found, days)
+        await update.message.reply_text(f"✅ Пользователю {username} выдан доступ на {days} дней.")
     else:
         await update.message.reply_text(f"❌ Пользователь {username} не найден.")
 
@@ -561,23 +533,12 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         timestamp = datetime.now(MSK_PLUS_1).strftime("%Y%m%d_%H%M%S")
         filename = f"backup_{timestamp}.sql"
         
+        # Делаем дамп с помощью pg_dump
         import subprocess
-        
-        # Парсим DATABASE_URL для pg_dump
-        db_url = DATABASE_URL.replace('postgresql://', '')
-        user_pass, host_db = db_url.split('@')
-        user, password = user_pass.split(':')
-        host_port, db_name = host_db.split('/')
-        host, port = host_port.split(':')
-        
-        env = os.environ.copy()
-        env['PGPASSWORD'] = password
-        
         result = subprocess.run(
-            ['pg_dump', '-h', host, '-p', port, '-U', user, '-d', db_name, '--clean', '--if-exists', '-f', filename],
+            ['pg_dump', DATABASE_URL, '--clean', '--if-exists', '-f', filename],
             capture_output=True,
-            text=True,
-            env=env
+            text=True
         )
         
         if result.returncode != 0:
@@ -605,8 +566,7 @@ async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         "📤 Отправьте SQL дамп (созданный командой /backup).\n\n"
-        "⚠️ ВНИМАНИЕ: текущие данные будут ПЕРЕЗАПИСАНЫ!\n"
-        "Для отмены отправьте любое сообщение."
+        "⚠️ ВНИМАНИЕ: текущие данные будут ПЕРЕЗАПИСАНЫ!"
     )
     context.user_data['awaiting_restore'] = 'sql'
 
@@ -716,36 +676,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
-    if not await check_access(user_id):
-        await update.message.reply_text(
-            f"⛔ Доступ временно приостановлен.\nСвяжитесь с администратором @{ADMIN_USERNAME}"
-        )
-        return
-    
     report = await get_today_pressure_report(user_id)
     await update.message.reply_text(report)
 
 async def glucose_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
-    if not await check_access(user_id):
-        await update.message.reply_text(
-            f"⛔ Доступ временно приостановлен.\nСвяжитесь с администратором @{ADMIN_USERNAME}"
-        )
-        return
-    
     report = await get_today_glucose_report(user_id)
     await update.message.reply_text(report)
 
 async def table_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
-    if not await check_access(user_id):
-        await update.message.reply_text(
-            f"⛔ Доступ временно приостановлен.\nСвяжитесь с администратором @{ADMIN_USERNAME}"
-        )
-        return
     
     await update.message.reply_text("🔄 Генерирую ваш Excel-файл...")
     
@@ -769,12 +709,6 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
     username = update.effective_user.username or update.effective_user.first_name
     
     await add_user(user_id, username)
-    
-    # Проверяем, не ожидается ли SQL дамп от админа
-    if is_admin(user_id) and context.user_data.get('awaiting_restore') == 'sql':
-        await update.message.reply_text("❌ Восстановление отменено. Ожидался SQL файл.")
-        context.user_data['awaiting_restore'] = None
-        return
     
     if not await check_access(user_id):
         await update.message.reply_text(
@@ -800,6 +734,7 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
         # Это глюкоза
         glucose = None
         insulin = None
+        comment_parts = []
         
         for n in numbers:
             if glucose is None and 1 <= n <= 30:
@@ -903,13 +838,8 @@ async def handle_restore_file(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     document = update.message.document
-    if not document:
-        await update.message.reply_text("❌ Пожалуйста, отправьте SQL дамп файлом (созданный командой /backup)")
-        context.user_data['awaiting_restore'] = None
-        return
-    
-    if not document.file_name or not document.file_name.endswith('.sql'):
-        await update.message.reply_text("❌ Ожидается файл с расширением .sql\nВосстановление отменено.")
+    if not document or not document.file_name.endswith('.sql'):
+        await update.message.reply_text("❌ Пожалуйста, отправьте SQL дамп (созданный командой /backup)")
         context.user_data['awaiting_restore'] = None
         return
     
@@ -920,31 +850,18 @@ async def handle_restore_file(update: Update, context: ContextTypes.DEFAULT_TYPE
         await file.download_to_drive(temp_file)
         
         import subprocess
+        result = subprocess.run(
+            ['psql', DATABASE_URL, '-f', temp_file],
+            capture_output=True,
+            text=True
+        )
         
-        db_url = DATABASE_URL.replace('postgresql://', '')
-        user_pass, host_db = db_url.split('@')
-        user, password = user_pass.split(':')
-        host_port, db_name = host_db.split('/')
-        host, port = host_port.split(':')
+        os.remove(temp_file)
         
-        env = os.environ.copy()
-        env['PGPASSWORD'] = password
-        
-        try:
-            result = subprocess.run(
-                ['psql', '-h', host, '-p', port, '-U', user, '-d', db_name, '-f', temp_file],
-                capture_output=True,
-                text=True,
-                env=env
-            )
-            
-            if result.returncode != 0:
-                await update.message.reply_text(f"❌ Ошибка при восстановлении: {result.stderr}")
-            else:
-                await update.message.reply_text(f"✅ Данные восстановлены из файла {document.file_name}")
-        finally:
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
+        if result.returncode != 0:
+            await update.message.reply_text(f"❌ Ошибка при восстановлении: {result.stderr}")
+        else:
+            await update.message.reply_text(f"✅ Данные восстановлены из файла {document.file_name}")
         
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка при восстановлении: {e}")
@@ -1017,12 +934,12 @@ async def set_commands(app):
     await app.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
 
 # ==================== ЗАПУСК ====================
-async def main():
-    """Основная асинхронная функция запуска бота"""
-    global db_pool
-    
+def main():
+    """Запуск бота"""
     # Инициализация БД
-    await init_db()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(init_db())
     
     # Создаём приложение
     app = Application.builder().token(TOKEN).build()
@@ -1053,9 +970,6 @@ async def main():
     app.add_handler(MessageHandler(filters.Document.ALL, handle_restore_file))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pressure_glucose))
     
-    # Устанавливаем команды меню
-    await set_commands(app)
-    
     # Настройка напоминаний
     job_queue = app.job_queue
     if job_queue:
@@ -1068,26 +982,8 @@ async def main():
     
     print("🤖 Бот запущен")
     
-    try:
-        # Только run_polling, без дополнительных initialize/start
-        await app.run_polling()
-    except asyncio.CancelledError:
-        print("Polling остановлен")
-    except Exception as e:
-        print(f"❌ Ошибка в polling: {e}")
-    finally:
-        # Корректное завершение
-        print("🤖 Бот останавливается...")
-        await close_db()
-        try:
-            await app.shutdown()
-        except:
-            pass
+    # Запускаем бота
+    app.run_polling()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n🤖 Бот остановлен пользователем")
-    except Exception as e:
-        print(f"❌ Критическая ошибка: {e}")
+    main()
