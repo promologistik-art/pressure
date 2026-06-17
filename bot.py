@@ -927,23 +927,14 @@ async def set_commands(app):
     await app.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
 
 # ==================== ЗАПУСК ====================
-def main():
-    """Запуск бота"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    try:
-        loop.run_until_complete(main_async())
-    except KeyboardInterrupt:
-        print("Бот остановлен")
-    finally:
-        loop.close()
-
-async def main_async():
+async def main():
+    """Основная асинхронная функция запуска бота"""
     global db_pool
     
+    # Инициализация БД
     await init_db()
     
+    # Создаём приложение
     app = Application.builder().token(TOKEN).build()
     
     if app.job_queue is None:
@@ -953,6 +944,7 @@ async def main_async():
         print(f"   Текущее время сервера: {datetime.now(MSK_PLUS_1).strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"   Часовой пояс: Europe/Samara (МСК+1)")
     
+    # Регистрируем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("report", report_command))
@@ -971,8 +963,10 @@ async def main_async():
     app.add_handler(MessageHandler(filters.Document.ALL, handle_restore_file))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pressure_glucose))
     
+    # Устанавливаем команды меню
     await set_commands(app)
     
+    # Настройка напоминаний
     job_queue = app.job_queue
     if job_queue:
         job_queue.run_daily(send_scheduled_reminder, time(5, 0))
@@ -984,9 +978,10 @@ async def main_async():
     
     print("🤖 Бот запущен")
     
+    # Запускаем бота
     await app.initialize()
     await app.start()
     await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
