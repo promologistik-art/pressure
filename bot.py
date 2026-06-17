@@ -13,8 +13,6 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment
 import asyncpg
 import tempfile
-import signal
-import sys
 
 load_dotenv()
 
@@ -35,11 +33,31 @@ async def init_db():
     global db_pool
     
     if db_pool is None:
-        db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
-        print("✅ Подключение к PostgreSQL установлено")
+        try:
+            for attempt in range(3):
+                try:
+                    db_pool = await asyncpg.create_pool(
+                        DATABASE_URL, 
+                        min_size=1, 
+                        max_size=5,
+                        timeout=10.0
+                    )
+                    print("✅ Подключение к PostgreSQL установлено")
+                    break
+                except Exception as e:
+                    print(f"⚠️ Попытка {attempt + 1}/3 подключения к БД: {e}")
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(2)
+        except Exception as e:
+            print(f"❌ Не удалось подключиться к БД: {e}")
+            raise
     
-    # Создаём таблицы
     async with db_pool.acquire() as conn:
+        # Проверка соединения
+        version = await conn.fetchval('SELECT version()')
+        print(f"📊 Версия PostgreSQL: {version.split(',')[0]}")
+        
         # Таблица пользователей
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
@@ -543,7 +561,6 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         timestamp = datetime.now(MSK_PLUS_1).strftime("%Y%m%d_%H%M%S")
         filename = f"backup_{timestamp}.sql"
         
-        # Делаем дамп с помощью pg_dump
         import subprocess
         
         # Парсим DATABASE_URL для pg_dump
@@ -755,7 +772,6 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
     
     # Проверяем, не ожидается ли SQL дамп от админа
     if is_admin(user_id) and context.user_data.get('awaiting_restore') == 'sql':
-        # Если админ отправляет текст вместо SQL файла, отменяем восстановление
         await update.message.reply_text("❌ Восстановление отменено. Ожидался SQL файл.")
         context.user_data['awaiting_restore'] = None
         return
@@ -784,7 +800,6 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
         # Это глюкоза
         glucose = None
         insulin = None
-        comment_parts = []
         
         for n in numbers:
             if glucose is None and 1 <= n <= 30:
@@ -904,7 +919,6 @@ async def handle_restore_file(update: Update, context: ContextTypes.DEFAULT_TYPE
         temp_file = f"temp_restore_{datetime.now(MSK_PLUS_1).strftime('%Y%m%d_%H%M%S')}.sql"
         await file.download_to_drive(temp_file)
         
-        # Восстанавливаем через psql
         import subprocess
         
         db_url = DATABASE_URL.replace('postgresql://', '')
@@ -929,7 +943,6 @@ async def handle_restore_file(update: Update, context: ContextTypes.DEFAULT_TYPE
             else:
                 await update.message.reply_text(f"✅ Данные восстановлены из файла {document.file_name}")
         finally:
-            # Гарантированно удаляем временный файл
             if os.path.exists(temp_file):
                 os.remove(temp_file)
         
@@ -1053,26 +1066,23 @@ async def main():
     else:
         print("ОШИБКА: job_queue не создан! Напоминания работать не будут")
     
-    # Регистрируем обработчик для корректного завершения
-    async def shutdown():
-        print("🤖 Бот останавливается...")
-        await close_db()
-        await app.stop()
-        await app.shutdown()
-    
-    # Обработка сигналов завершения
-    loop = asyncio.get_event_loop()
-    try:
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
-    except NotImplementedError:
-        # Windows не поддерживает add_signal_handler
-        pass
-    
     print("🤖 Бот запущен")
     
-    # Используем ТОЛЬКО run_polling, без отдельных initialize/start
-    await app.run_polling()
+    try:
+        # Только run_polling, без дополнительных initialize/start
+        await app.run_polling()
+    except asyncio.CancelledError:
+        print("Polling остановлен")
+    except Exception as e:
+        print(f"❌ Ошибка в polling: {e}")
+    finally:
+        # Корректное завершение
+        print("🤖 Бот останавливается...")
+        await close_db()
+        try:
+            await app.shutdown()
+        except:
+            pass
 
 if __name__ == "__main__":
     try:
