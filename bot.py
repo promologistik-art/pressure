@@ -11,65 +11,135 @@ from telegram import Update, BotCommand, BotCommandScopeChat
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment
+import asyncpg
+import tempfile
 
 load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "silverzen")
-EXCEL_FILE = os.getenv("EXCEL_FILE", "medical_journal.xlsx")
+DATABASE_URL = os.getenv("DATABASE_URL")
 USERS_DB = os.getenv("USERS_DB", "users.json")
 
 # Время МСК+1 (UTC+4)
 MSK_PLUS_1 = pytz.timezone('Europe/Samara')
 
-# Типы замеров глюкозы
-GLUCOSE_TYPES = ["натощак", "через 2 часа после еды", "перед едой", "перед сном", "ночью"]
+# Глобальная переменная для пула подключений к БД
+db_pool = None
 
-# ==================== РАБОТА С БАЗОЙ ПОЛЬЗОВАТЕЛЕЙ ====================
-def load_users():
-    if os.path.exists(USERS_DB):
-        with open(USERS_DB, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {}
+# ==================== РАБОТА С БАЗОЙ ДАННЫХ ====================
+async def init_db():
+    """Инициализация подключения к БД и создание таблиц"""
+    global db_pool
+    
+    if db_pool is None:
+        db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+        print("✅ Подключение к PostgreSQL установлено")
+    
+    # Создаём таблицы
+    async with db_pool.acquire() as conn:
+        # Таблица пользователей
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                joined TIMESTAMP,
+                status TEXT DEFAULT 'active',
+                days_count INT DEFAULT 1,
+                last_reminder_sent DATE,
+                access_until DATE,
+                payment_info TEXT,
+                payment_date DATE
+            )
+        ''')
+        
+        # Таблица давления
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS pressure (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
+                date DATE NOT NULL,
+                time TIME NOT NULL,
+                period TEXT CHECK (period IN ('Утро', 'День', 'Вечер')),
+                systolic INT,
+                diastolic INT,
+                pulse INT,
+                comment TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        ''')
+        
+        # Таблица глюкозы
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS glucose (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
+                date DATE NOT NULL,
+                time TIME NOT NULL,
+                period TEXT CHECK (period IN ('Утро', 'День', 'Вечер')),
+                glucose_value DECIMAL(4,1),
+                glucose_type TEXT,
+                comment TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        ''')
+        
+        # Индексы для ускорения запросов
+        await conn.execute('CREATE INDEX IF NOT EXISTS idx_pressure_user_id ON pressure(user_id)')
+        await conn.execute('CREATE INDEX IF NOT EXISTS idx_glucose_user_id ON glucose(user_id)')
+        
+        print("✅ Таблицы созданы/проверены")
 
-def save_users(users):
-    with open(USERS_DB, 'w', encoding='utf-8') as f:
-        json.dump(users, f, ensure_ascii=False, indent=2)
+async def get_db_pool():
+    """Возвращает пул подключений к БД"""
+    return db_pool
 
-def add_user(user_id, username):
-    users = load_users()
+# ==================== РАБОТА С ПОЛЬЗОВАТЕЛЯМИ ====================
+async def add_user(user_id, username):
+    users = await get_all_users()
     if str(user_id) not in users:
         now = datetime.now(MSK_PLUS_1)
-        users[str(user_id)] = {
-            "username": username,
-            "joined": now.strftime("%d-%m-%Y %H:%M:%S"),
-            "status": "active",
-            "days_count": 1,
-            "last_reminder_sent": "",
-            "access_until": None,
-            "payment_info": None,
-            "payment_date": None
-        }
-        save_users(users)
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO users (user_id, username, joined, status, days_count)
+                VALUES ($1, $2, $3, 'active', 1)
+            ''', user_id, username, now)
         return True
     else:
-        if users[str(user_id)]["username"] != username:
-            users[str(user_id)]["username"] = username
-            save_users(users)
+        # Обновляем username если изменился
+        if users.get(str(user_id), {}).get("username") != username:
+            async with db_pool.acquire() as conn:
+                await conn.execute('UPDATE users SET username = $1 WHERE user_id = $2', username, user_id)
     return False
 
-def update_user_days(user_id):
-    users = load_users()
-    user = users.get(str(user_id))
-    if user and user["status"] == "active":
-        joined_str = user["joined"]
-        joined = datetime.strptime(joined_str, "%d-%m-%Y %H:%M:%S")
-        joined = MSK_PLUS_1.localize(joined)
-        days = (datetime.now(MSK_PLUS_1) - joined).days + 1
-        user["days_count"] = days
-        save_users(users)
-        return days
+async def get_all_users():
+    """Возвращает всех пользователей в виде словаря (как раньше в users.json)"""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch('SELECT * FROM users')
+        users = {}
+        for row in rows:
+            uid = str(row['user_id'])
+            users[uid] = {
+                "username": row['username'],
+                "joined": row['joined'].strftime("%d-%m-%Y %H:%M:%S") if row['joined'] else None,
+                "status": row['status'],
+                "days_count": row['days_count'],
+                "last_reminder_sent": row['last_reminder_sent'].strftime("%d-%m-%Y") if row['last_reminder_sent'] else "",
+                "access_until": row['access_until'].strftime("%d-%m-%Y") if row['access_until'] else None,
+                "payment_info": row['payment_info'],
+                "payment_date": row['payment_date'].strftime("%d-%m-%Y") if row['payment_date'] else None
+            }
+        return users
+
+async def update_user_days(user_id):
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow('SELECT joined FROM users WHERE user_id = $1', user_id)
+        if row:
+            joined = row['joined']
+            days = (datetime.now(MSK_PLUS_1) - joined).days + 1
+            await conn.execute('UPDATE users SET days_count = $1 WHERE user_id = $2', days, user_id)
+            return days
     return 0
 
 async def check_and_send_3day_reminder(user_id, app):
@@ -77,70 +147,61 @@ async def check_and_send_3day_reminder(user_id, app):
     if str(user_id) == str(ADMIN_ID):
         return False
     
-    users = load_users()
-    user = users.get(str(user_id))
-    if user and user["status"] == "active":
-        joined_str = user["joined"]
-        joined = datetime.strptime(joined_str, "%d-%m-%Y %H:%M:%S")
-        joined = MSK_PLUS_1.localize(joined)
-        days = (datetime.now(MSK_PLUS_1) - joined).days + 1
-        last_reminder = user.get("last_reminder_sent", "")
-        
-        if days >= 3 and last_reminder != datetime.now(MSK_PLUS_1).strftime("%d-%m-%Y"):
-            user["last_reminder_sent"] = datetime.now(MSK_PLUS_1).strftime("%d-%m-%Y")
-            save_users(users)
-            try:
-                await app.bot.send_message(
-                    chat_id=int(user_id),
-                    text="Вы уже 3 дня пользуетесь ботом. Если хотите продолжить, есть предложения или замечания, свяжитесь с админом."
-                )
-            except:
-                pass
-            return True
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow('SELECT joined, status, last_reminder_sent FROM users WHERE user_id = $1', user_id)
+        if row and row['status'] == 'active':
+            joined = row['joined']
+            days = (datetime.now(MSK_PLUS_1) - joined).days + 1
+            last_reminder = row['last_reminder_sent']
+            
+            if days >= 3 and last_reminder != datetime.now(MSK_PLUS_1).date():
+                await conn.execute('UPDATE users SET last_reminder_sent = $1 WHERE user_id = $2', 
+                                  datetime.now(MSK_PLUS_1).date(), user_id)
+                try:
+                    await app.bot.send_message(
+                        chat_id=int(user_id),
+                        text="Вы уже 3 дня пользуетесь ботом. Если хотите продолжить, есть предложения или замечания, свяжитесь с админом."
+                    )
+                except:
+                    pass
+                return True
     return False
 
-def check_access(user_id):
-    users = load_users()
-    user = users.get(str(user_id))
-    if not user:
-        return False
-    
+async def check_access(user_id):
     if str(user_id) == str(ADMIN_ID):
         return True
     
-    if user["status"] == "active":
-        return True
-    
-    if user["status"] == "access":
-        if user.get("access_until"):
-            access_until = datetime.strptime(user["access_until"], "%d-%m-%Y")
-            access_until = MSK_PLUS_1.localize(access_until)
-            if datetime.now(MSK_PLUS_1) <= access_until:
-                return True
-            else:
-                user["status"] = "blocked"
-                save_users(users)
-                return False
-        return True
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow('SELECT status, access_until FROM users WHERE user_id = $1', user_id)
+        if not row:
+            return False
+        
+        if row['status'] == 'active':
+            return True
+        
+        if row['status'] == 'access':
+            if row['access_until']:
+                if datetime.now(MSK_PLUS_1).date() <= row['access_until']:
+                    return True
+                else:
+                    await conn.execute('UPDATE users SET status = $1 WHERE user_id = $2', 'blocked', user_id)
+                    return False
+            return True
     
     return False
 
-def grant_access(user_id, days):
-    users = load_users()
-    user = users.get(str(user_id))
-    if user:
-        user["status"] = "access"
-        user["access_until"] = (datetime.now(MSK_PLUS_1) + timedelta(days=days)).strftime("%d-%m-%Y")
-        save_users(users)
-        return True
+async def grant_access(user_id, days):
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow('SELECT * FROM users WHERE user_id = $1', user_id)
+        if row:
+            access_until = (datetime.now(MSK_PLUS_1) + timedelta(days=days)).date()
+            await conn.execute('UPDATE users SET status = $1, access_until = $2 WHERE user_id = $3', 
+                              'access', access_until, user_id)
+            return True
     return False
 
 def is_admin(user_id):
     return user_id == ADMIN_ID
-
-def get_all_users():
-    users = load_users()
-    return users
 
 # ==================== ОПРЕДЕЛЕНИЕ ПЕРИОДА ПО ВРЕМЕНИ ====================
 def get_period_by_time():
@@ -154,182 +215,171 @@ def get_period_by_time():
     else:
         return "Вечер"
 
-# ==================== РАБОТА С EXCEL (ОДИН ФАЙЛ, ДВА ЛИСТА) ====================
-def init_excel():
-    if not os.path.exists(EXCEL_FILE):
-        wb = Workbook()
+# ==================== РАБОТА С EXCEL ====================
+async def generate_pressure_excel(user_id):
+    """Генерирует Excel файл с давлением для конкретного пользователя"""
+    wb = Workbook()
+    
+    # Удаляем дефолтный лист
+    default_sheet = wb.active
+    wb.remove(default_sheet)
+    
+    # Лист 1: Давление
+    ws_pressure = wb.create_sheet("Давление")
+    headers_pressure = ['Дата', 'Время', 'Период', 'Верхнее', 'Нижнее', 'Пульс', 'Комментарий']
+    for col, header in enumerate(headers_pressure, 1):
+        cell = ws_pressure.cell(row=1, column=col, value=header)
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+    
+    col_widths_pressure = {'A': 12, 'B': 10, 'C': 8, 'D': 10, 'E': 10, 'F': 8, 'G': 40}
+    for col_letter, width in col_widths_pressure.items():
+        ws_pressure.column_dimensions[col_letter].width = width
+    ws_pressure.row_dimensions[1].height = 20
+    
+    # Лист 2: Глюкоза
+    ws_glucose = wb.create_sheet("Глюкоза")
+    headers_glucose = ['Дата', 'Время', 'Период', 'Глюкоза', 'Тип замера', 'Комментарий']
+    for col, header in enumerate(headers_glucose, 1):
+        cell = ws_glucose.cell(row=1, column=col, value=header)
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+    
+    col_widths_glucose = {'A': 12, 'B': 10, 'C': 8, 'D': 10, 'E': 25, 'F': 40}
+    for col_letter, width in col_widths_glucose.items():
+        ws_glucose.column_dimensions[col_letter].width = width
+    ws_glucose.row_dimensions[1].height = 20
+    
+    # Заполняем данными из БД
+    async with db_pool.acquire() as conn:
+        # Давление
+        rows = await conn.fetch('''
+            SELECT date, time, period, systolic, diastolic, pulse, comment 
+            FROM pressure 
+            WHERE user_id = $1 
+            ORDER BY date DESC, time DESC
+        ''', user_id)
         
-        default_sheet = wb.active
-        wb.remove(default_sheet)
+        row_num = 2
+        for row in rows:
+            ws_pressure.cell(row=row_num, column=1, value=row['date'].strftime("%d-%m-%Y"))
+            ws_pressure.cell(row=row_num, column=2, value=row['time'].strftime("%H:%M:%S"))
+            ws_pressure.cell(row=row_num, column=3, value=row['period'])
+            ws_pressure.cell(row=row_num, column=4, value=row['systolic'])
+            ws_pressure.cell(row=row_num, column=5, value=row['diastolic'])
+            ws_pressure.cell(row=row_num, column=6, value=row['pulse'] if row['pulse'] else "")
+            ws_pressure.cell(row=row_num, column=7, value=row['comment'] if row['comment'] else "")
+            row_num += 1
         
-        # Лист 1: Давление
-        ws_pressure = wb.create_sheet("Давление")
-        headers_pressure = ['Дата', 'Время', 'Период', 'Верхнее', 'Нижнее', 'Пульс', 'Комментарий']
-        for col, header in enumerate(headers_pressure, 1):
-            cell = ws_pressure.cell(row=1, column=col, value=header)
-            cell.font = Font(bold=True)
-            cell.alignment = Alignment(horizontal='center', vertical='center')
+        # Глюкоза
+        rows = await conn.fetch('''
+            SELECT date, time, period, glucose_value, glucose_type, comment 
+            FROM glucose 
+            WHERE user_id = $1 
+            ORDER BY date DESC, time DESC
+        ''', user_id)
         
-        col_widths_pressure = {'A': 12, 'B': 10, 'C': 8, 'D': 10, 'E': 10, 'F': 8, 'G': 40}
-        for col_letter, width in col_widths_pressure.items():
-            ws_pressure.column_dimensions[col_letter].width = width
-        ws_pressure.row_dimensions[1].height = 20
-        
-        # Лист 2: Глюкоза
-        ws_glucose = wb.create_sheet("Глюкоза")
-        headers_glucose = ['Дата', 'Время', 'Период', 'Глюкоза', 'Тип замера', 'Комментарий']
-        for col, header in enumerate(headers_glucose, 1):
-            cell = ws_glucose.cell(row=1, column=col, value=header)
-            cell.font = Font(bold=True)
-            cell.alignment = Alignment(horizontal='center', vertical='center')
-        
-        col_widths_glucose = {'A': 12, 'B': 10, 'C': 8, 'D': 10, 'E': 25, 'F': 40}
-        for col_letter, width in col_widths_glucose.items():
-            ws_glucose.column_dimensions[col_letter].width = width
-        ws_glucose.row_dimensions[1].height = 20
-        
-        wb.save(EXCEL_FILE)
-        print(f"Создан файл {EXCEL_FILE} с двумя листами")
+        row_num = 2
+        for row in rows:
+            ws_glucose.cell(row=row_num, column=1, value=row['date'].strftime("%d-%m-%Y"))
+            ws_glucose.cell(row=row_num, column=2, value=row['time'].strftime("%H:%M:%S"))
+            ws_glucose.cell(row=row_num, column=3, value=row['period'])
+            ws_glucose.cell(row=row_num, column=4, value=float(row['glucose_value']))
+            ws_glucose.cell(row=row_num, column=5, value=row['glucose_type'] if row['glucose_type'] else "")
+            ws_glucose.cell(row=row_num, column=6, value=row['comment'] if row['comment'] else "")
+            row_num += 1
+    
+    # Сохраняем во временный файл
+    with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
+        wb.save(tmp.name)
+        return tmp.name
 
-def save_pressure_to_excel(user_id, period, systolic, diastolic, pulse, comment):
+# ==================== РАБОТА С ДАННЫМИ ====================
+async def save_pressure_to_db(user_id, period, systolic, diastolic, pulse, comment):
     now = datetime.now(MSK_PLUS_1)
     
     if now.hour < 6:
-        date_str = (now - timedelta(days=1)).strftime("%d-%m-%Y")
+        date_val = (now - timedelta(days=1)).date()
     else:
-        date_str = now.strftime("%d-%m-%Y")
+        date_val = now.date()
     
-    time_str = now.strftime("%H:%M:%S")
+    time_val = now.time()
     
-    if os.path.exists(EXCEL_FILE):
-        wb = load_workbook(EXCEL_FILE)
-        if "Давление" not in wb.sheetnames:
-            wb.create_sheet("Давление")
-        ws = wb["Давление"]
-    else:
-        init_excel()
-        wb = load_workbook(EXCEL_FILE)
-        ws = wb["Давление"]
-    
-    next_row = ws.max_row + 1
-    
-    ws.cell(row=next_row, column=1, value=date_str)
-    ws.cell(row=next_row, column=2, value=time_str)
-    ws.cell(row=next_row, column=3, value=period)
-    ws.cell(row=next_row, column=4, value=systolic)
-    ws.cell(row=next_row, column=5, value=diastolic)
-    ws.cell(row=next_row, column=6, value=pulse if pulse else "")
-    ws.cell(row=next_row, column=7, value=comment if comment else "")
-    
-    wb.save(EXCEL_FILE)
+    async with db_pool.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO pressure (user_id, date, time, period, systolic, diastolic, pulse, comment)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ''', user_id, date_val, time_val, period, systolic, diastolic, pulse, comment)
 
-def save_glucose_to_excel(user_id, period, glucose, glucose_type, comment):
+async def save_glucose_to_db(user_id, period, glucose, glucose_type, comment):
     now = datetime.now(MSK_PLUS_1)
     
     if now.hour < 6:
-        date_str = (now - timedelta(days=1)).strftime("%d-%m-%Y")
+        date_val = (now - timedelta(days=1)).date()
     else:
-        date_str = now.strftime("%d-%m-%Y")
+        date_val = now.date()
     
-    time_str = now.strftime("%H:%M:%S")
+    time_val = now.time()
     
-    if os.path.exists(EXCEL_FILE):
-        wb = load_workbook(EXCEL_FILE)
-        if "Глюкоза" not in wb.sheetnames:
-            wb.create_sheet("Глюкоза")
-        ws = wb["Глюкоза"]
-    else:
-        init_excel()
-        wb = load_workbook(EXCEL_FILE)
-        ws = wb["Глюкоза"]
-    
-    next_row = ws.max_row + 1
-    
-    ws.cell(row=next_row, column=1, value=date_str)
-    ws.cell(row=next_row, column=2, value=time_str)
-    ws.cell(row=next_row, column=3, value=period)
-    ws.cell(row=next_row, column=4, value=glucose)
-    ws.cell(row=next_row, column=5, value=glucose_type)
-    ws.cell(row=next_row, column=6, value=comment if comment else "")
-    
-    wb.save(EXCEL_FILE)
+    async with db_pool.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO glucose (user_id, date, time, period, glucose_value, glucose_type, comment)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ''', user_id, date_val, time_val, period, glucose, glucose_type, comment)
 
-def get_today_pressure_report():
-    if not os.path.exists(EXCEL_FILE):
-        return None
+async def get_today_pressure_report(user_id):
+    today = datetime.now(MSK_PLUS_1).date()
     
-    wb = load_workbook(EXCEL_FILE)
-    if "Давление" not in wb.sheetnames:
-        return "📊 Отчет по давлению за сегодня\n\nНет данных."
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch('''
+            SELECT date, time, period, systolic, diastolic, pulse, comment 
+            FROM pressure 
+            WHERE user_id = $1 AND date = $2
+            ORDER BY time ASC
+        ''', user_id, today)
     
-    ws = wb["Давление"]
-    today = datetime.now(MSK_PLUS_1).strftime("%d-%m-%Y")
+    if not rows:
+        return f"📊 Отчет по давлению за {today.strftime('%d-%m-%Y')}\n\nНет данных."
     
-    report = f"📊 Отчет по давлению за {today}\n\n"
-    has_data = False
-    
-    for row in range(2, ws.max_row + 1):
-        date = ws.cell(row=row, column=1).value
-        if date == today:
-            has_data = True
-            time_val = ws.cell(row=row, column=2).value or "-"
-            period = ws.cell(row=row, column=3).value or "-"
-            systolic = ws.cell(row=row, column=4).value or "-"
-            diastolic = ws.cell(row=row, column=5).value or "-"
-            pulse = ws.cell(row=row, column=6).value or "-"
-            comment = ws.cell(row=row, column=7).value or ""
-            
-            period_emoji = {"Утро": "🌅", "День": "☀️", "Вечер": "🌙"}
-            emoji = period_emoji.get(period, "")
-            
-            report += f"{emoji} {period} {time_val}: {systolic}/{diastolic}"
-            if pulse != "-":
-                report += f", пульс {pulse}"
-            if comment:
-                report += f"\n   📝 {comment}"
-            report += "\n\n"
-    
-    if not has_data:
-        return f"📊 Отчет по давлению за {today}\n\nНет данных."
+    report = f"📊 Отчет по давлению за {today.strftime('%d-%m-%Y')}\n\n"
+    for row in rows:
+        period_emoji = {"Утро": "🌅", "День": "☀️", "Вечер": "🌙"}
+        emoji = period_emoji.get(row['period'], "")
+        
+        report += f"{emoji} {row['period']} {row['time'].strftime('%H:%M:%S')}: {row['systolic']}/{row['diastolic']}"
+        if row['pulse']:
+            report += f", пульс {row['pulse']}"
+        if row['comment']:
+            report += f"\n   📝 {row['comment']}"
+        report += "\n\n"
     
     return report
 
-def get_today_glucose_report():
-    if not os.path.exists(EXCEL_FILE):
-        return None
+async def get_today_glucose_report(user_id):
+    today = datetime.now(MSK_PLUS_1).date()
     
-    wb = load_workbook(EXCEL_FILE)
-    if "Глюкоза" not in wb.sheetnames:
-        return "📊 Отчет по глюкозе за сегодня\n\nНет данных."
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch('''
+            SELECT date, time, period, glucose_value, glucose_type, comment 
+            FROM glucose 
+            WHERE user_id = $1 AND date = $2
+            ORDER BY time ASC
+        ''', user_id, today)
     
-    ws = wb["Глюкоза"]
-    today = datetime.now(MSK_PLUS_1).strftime("%d-%m-%Y")
+    if not rows:
+        return f"📊 Отчет по глюкозе за {today.strftime('%d-%m-%Y')}\n\nНет данных."
     
-    report = f"📊 Отчет по глюкозе за {today}\n\n"
-    has_data = False
-    
-    for row in range(2, ws.max_row + 1):
-        date = ws.cell(row=row, column=1).value
-        if date == today:
-            has_data = True
-            time_val = ws.cell(row=row, column=2).value or "-"
-            period = ws.cell(row=row, column=3).value or "-"
-            glucose = ws.cell(row=row, column=4).value or "-"
-            glucose_type = ws.cell(row=row, column=5).value or "-"
-            comment = ws.cell(row=row, column=6).value or ""
-            
-            period_emoji = {"Утро": "🌅", "День": "☀️", "Вечер": "🌙"}
-            emoji = period_emoji.get(period, "")
-            
-            report += f"{emoji} {period} {time_val}: глюкоза {glucose}"
-            if glucose_type != "-":
-                report += f" ({glucose_type})"
-            if comment:
-                report += f"\n   📝 {comment}"
-            report += "\n\n"
-    
-    if not has_data:
-        return f"📊 Отчет по глюкозе за {today}\n\nНет данных."
+    report = f"📊 Отчет по глюкозе за {today.strftime('%d-%m-%Y')}\n\n"
+    for row in rows:
+        period_emoji = {"Утро": "🌅", "День": "☀️", "Вечер": "🌙"}
+        emoji = period_emoji.get(row['period'], "")
+        
+        report += f"{emoji} {row['period']} {row['time'].strftime('%H:%M:%S')}: глюкоза {float(row['glucose_value'])}"
+        if row['glucose_type']:
+            report += f" ({row['glucose_type']})"
+        if row['comment']:
+            report += f"\n   📝 {row['comment']}"
+        report += "\n\n"
     
     return report
 
@@ -364,8 +414,8 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/users - список пользователей\n"
         "/users_excel - выгрузить пользователей в Excel\n"
         "/grant username дни - выдать доступ (5,7,30)\n"
-        "/backup - создать резервную копию (Excel + users.json)\n"
-        "/restore - восстановить данные из zip-архива\n"
+        "/backup - создать резервную копию (SQL дамп)\n"
+        "/restore - восстановить данные из SQL дампа\n"
         "/status - статус бота\n"
         "/test_remind - тестовая отправка напоминаний"
     )
@@ -375,7 +425,7 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Доступ запрещён.")
         return
     
-    users = get_all_users()
+    users = await get_all_users()
     if not users:
         await update.message.reply_text("Нет пользователей.")
         return
@@ -400,7 +450,7 @@ async def admin_users_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Доступ запрещён.")
         return
     
-    users = get_all_users()
+    users = await get_all_users()
     if not users:
         await update.message.reply_text("Нет пользователей.")
         return
@@ -455,140 +505,65 @@ async def admin_grant(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Доступны дни: 5, 7, 30")
         return
     
-    users = get_all_users()
+    users = await get_all_users()
     found = None
     for uid, data in users.items():
         if data.get('username', '').lower() == username.lower():
-            found = uid
+            found = int(uid)
             break
     
     if found:
-        grant_access(found, days)
+        await grant_access(found, days)
         await update.message.reply_text(f"✅ Пользователю {username} выдан доступ на {days} дней.")
     else:
         await update.message.reply_text(f"❌ Пользователь {username} не найден.")
 
 async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Создаёт резервную копию (Excel + users.json) в zip-архиве"""
+    """Создаёт резервную копию БД (SQL дамп)"""
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("Доступ запрещён.")
         return
     
-    files_to_backup = []
-    if os.path.exists(EXCEL_FILE):
-        files_to_backup.append(EXCEL_FILE)
-    else:
-        await update.message.reply_text(f"❌ Файл {EXCEL_FILE} не найден.")
-        return
-    
-    if os.path.exists(USERS_DB):
-        files_to_backup.append(USERS_DB)
-    else:
-        await update.message.reply_text(f"⚠️ Файл {USERS_DB} не найден, будет создан новый при запуске.")
-    
-    timestamp = datetime.now(MSK_PLUS_1).strftime("%Y%m%d_%H%M%S")
-    zip_filename = f"backup_{timestamp}.zip"
-    
     try:
-        with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for file in files_to_backup:
-                zipf.write(file, os.path.basename(file))
+        timestamp = datetime.now(MSK_PLUS_1).strftime("%Y%m%d_%H%M%S")
+        filename = f"backup_{timestamp}.sql"
         
-        with open(zip_filename, 'rb') as f:
+        # Делаем дамп с помощью pg_dump
+        import subprocess
+        result = subprocess.run(
+            ['pg_dump', DATABASE_URL, '--clean', '--if-exists', '-f', filename],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode != 0:
+            await update.message.reply_text(f"❌ Ошибка при создании дампа: {result.stderr}")
+            return
+        
+        with open(filename, 'rb') as f:
             await update.message.reply_document(
                 document=f,
-                filename=zip_filename,
-                caption=f"📦 Резервная копия данных от {datetime.now(MSK_PLUS_1).strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                        f"Содержит:\n"
-                        f"• {os.path.basename(EXCEL_FILE)} - медицинский журнал\n"
-                        f"• {os.path.basename(USERS_DB)} - база пользователей"
+                filename=filename,
+                caption=f"📦 Резервная копия БД от {datetime.now(MSK_PLUS_1).strftime('%d-%m-%Y %H:%M:%S')}"
             )
         
-        os.remove(zip_filename)
-        print(f"Создана резервная копия: {zip_filename}")
+        os.remove(filename)
+        print(f"Создана резервная копия БД: {filename}")
         
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка при создании резервной копии: {e}")
 
 async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Восстанавливает данные из zip-архива (только админ)"""
+    """Восстанавливает данные из SQL дампа"""
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("Доступ запрещён.")
         return
     
     await update.message.reply_text(
-        "📤 Отправьте zip-архив с резервной копией (созданный командой /backup).\n\n"
+        "📤 Отправьте SQL дамп (созданный командой /backup).\n\n"
         "⚠️ ВНИМАНИЕ: текущие данные будут ПЕРЕЗАПИСАНЫ!"
     )
-    context.user_data['awaiting_restore'] = True
-
-async def handle_restore_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик загруженного zip-файла для восстановления"""
-    if not is_admin(update.effective_user.id):
-        return
-    
-    if not context.user_data.get('awaiting_restore'):
-        return
-    
-    document = update.message.document
-    if not document or not document.file_name.endswith('.zip'):
-        await update.message.reply_text("❌ Пожалуйста, отправьте zip-архив (созданный командой /backup)")
-        return
-    
-    try:
-        file = await context.bot.get_file(document.file_id)
-        
-        temp_zip = f"temp_restore_{datetime.now(MSK_PLUS_1).strftime('%Y%m%d_%H%M%S')}.zip"
-        await file.download_to_drive(temp_zip)
-        
-        extract_dir = f"extract_{datetime.now(MSK_PLUS_1).strftime('%Y%m%d_%H%M%S')}"
-        os.makedirs(extract_dir, exist_ok=True)
-        
-        with zipfile.ZipFile(temp_zip, 'r') as zipf:
-            zipf.extractall(extract_dir)
-        
-        restored_files = []
-        
-        # Восстанавливаем Excel файл
-        extracted_excel = os.path.join(extract_dir, os.path.basename(EXCEL_FILE))
-        if os.path.exists(extracted_excel):
-            wb = load_workbook(extracted_excel)
-            sheet_names = wb.sheetnames
-            
-            if "Глюкоза" not in sheet_names:
-                ws_glucose = wb.create_sheet("Глюкоза")
-                headers_glucose = ['Дата', 'Время', 'Период', 'Глюкоза', 'Тип замера', 'Комментарий']
-                for col, header in enumerate(headers_glucose, 1):
-                    cell = ws_glucose.cell(row=1, column=col, value=header)
-                    cell.font = Font(bold=True)
-                    cell.alignment = Alignment(horizontal='center', vertical='center')
-                wb.save(extracted_excel)
-                print("Добавлен отсутствующий лист 'Глюкоза'")
-            
-            shutil.copy2(extracted_excel, EXCEL_FILE)
-            restored_files.append(os.path.basename(EXCEL_FILE))
-        
-        # Восстанавливаем users.json
-        extracted_users = os.path.join(extract_dir, os.path.basename(USERS_DB))
-        if os.path.exists(extracted_users):
-            shutil.copy2(extracted_users, USERS_DB)
-            restored_files.append(os.path.basename(USERS_DB))
-        
-        os.remove(temp_zip)
-        shutil.rmtree(extract_dir)
-        
-        if restored_files:
-            await update.message.reply_text(
-                f"✅ Данные восстановлены из файла {document.file_name}\n\n"
-                f"Восстановлено: {', '.join(restored_files)}"
-            )
-        else:
-            await update.message.reply_text("❌ Архив не содержит нужных файлов")
-        
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка при восстановлении: {e}")
-    finally:
-        context.user_data['awaiting_restore'] = False
+    context.user_data['awaiting_restore'] = 'sql'
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Проверка статуса бота (только админ)"""
@@ -597,7 +572,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     status = "работает" if context.application.job_queue else "НЕ РАБОТАЕТ"
-    await update.message.reply_text(f"🤖 Статус бота:\n\nJobQueue: {status}")
+    await update.message.reply_text(f"🤖 Статус бота:\n\nJobQueue: {status}\nБаза данных: ✅ подключена")
 
 async def test_remind_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Тестовая отправка напоминания всем (только админ)"""
@@ -607,10 +582,10 @@ async def test_remind_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("🔄 Отправляю тестовые напоминания всем пользователям...")
     
-    users = get_all_users()
+    users = await get_all_users()
     sent = 0
     for uid, data in users.items():
-        if check_access(int(uid)):
+        if await check_access(int(uid)):
             try:
                 await context.bot.send_message(
                     chat_id=int(uid),
@@ -627,7 +602,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or update.effective_user.first_name
     
-    is_new = add_user(user_id, username)
+    is_new = await add_user(user_id, username)
     
     if is_new and not is_admin(user_id):
         now = datetime.now(MSK_PLUS_1)
@@ -650,9 +625,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📝 Форматы ввода глюкозы:\n"
         "• 5.5 - глюкоза (период определится автоматически)\n"
         "• 5.5 натощак - глюкоза с типом замера\n"
-        "• 5.5 через 2 часа после еды - глюкоза с типом замера\n\n"
+        "• 5.5 через 2 часа после еды - глюкоза с типом замера\n"
+        "• 9,2 инсулин 10 - глюкоза и доза инсулина\n\n"
         "🌅 Бот сам определит время суток (Утро, День, Вечер)\n"
-        "💾 Давление и глюкоза сохраняются в одном файле на разных листах\n\n"
+        "💾 Все данные хранятся в защищённой базе данных\n\n"
         "Команды:\n"
         "/table - получить Excel файл (2 листа: давление и глюкоза)\n"
         "/report - отчет по давлению за сегодня\n"
@@ -674,7 +650,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Форматы ввода глюкозы:\n"
         "• 5.5 - глюкоза\n"
         "• 5.5 натощак - глюкоза с типом замера\n"
-        "• 5.5 через 2 часа после еды\n\n"
+        "• 5.5 через 2 часа после еды\n"
+        "• 9,2 инсулин 10 - глюкоза и доза инсулина\n\n"
         "Рекомендации по измерению глюкозы:\n"
         "• Утром натощак\n"
         "• Перед каждым приёмом пищи\n"
@@ -693,56 +670,94 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    report = get_today_pressure_report()
+    user_id = update.effective_user.id
+    report = await get_today_pressure_report(user_id)
     await update.message.reply_text(report)
 
 async def glucose_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    report = get_today_glucose_report()
+    user_id = update.effective_user.id
+    report = await get_today_glucose_report(user_id)
     await update.message.reply_text(report)
 
 async def table_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not os.path.exists(EXCEL_FILE):
-        await update.message.reply_text("Журнал пуст.")
-        return
+    user_id = update.effective_user.id
     
-    with open(EXCEL_FILE, 'rb') as f:
-        await update.message.reply_document(
-            document=f,
-            filename="medical_journal.xlsx",
-            caption="📊 Медицинский журнал (давление и глюкоза)"
-        )
+    await update.message.reply_text("🔄 Генерирую ваш Excel-файл...")
+    
+    try:
+        filename = await generate_pressure_excel(user_id)
+        
+        with open(filename, 'rb') as f:
+            await update.message.reply_document(
+                document=f,
+                filename="medical_journal.xlsx",
+                caption="📊 Ваш медицинский журнал (давление и глюкоза)\n\n"
+                        "Все ваши данные — только ваши. Другие пользователи не видят их."
+            )
+        
+        os.remove(filename)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка при создании файла: {e}")
 
 async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or update.effective_user.first_name
     
-    add_user(user_id, username)
+    await add_user(user_id, username)
     
-    if not check_access(user_id):
+    if not await check_access(user_id):
         await update.message.reply_text(
             f"⛔ Доступ временно приостановлен.\nСвяжитесь с администратором @{ADMIN_USERNAME}"
         )
         return
     
     await check_and_send_3day_reminder(user_id, context.application)
-    update_user_days(user_id)
+    await update_user_days(user_id)
     
     text = update.message.text.strip()
+    text_lower = text.lower()
     
+    # Проверяем, есть ли в тексте упоминание инсулина
+    is_insulin = any(word in text_lower for word in ["инсулин", "инсулина", "ед", "единиц", "iu", "ме", "мед", "единица"])
+    
+    # Ищем все числа (включая десятичные)
     numbers = re.findall(r'\d+[.,]?\d*', text)
     numbers = [float(n.replace(',', '.')) for n in numbers]
     
-    # Проверяем на глюкозу (одно число 1-30)
-    if len(numbers) == 1 and 1 <= numbers[0] <= 30:
-        glucose = numbers[0]
+    # Если есть инсулин или одно число 1-30 — это глюкоза
+    if is_insulin or (len(numbers) >= 1 and 1 <= numbers[0] <= 30):
+        # Это глюкоза
+        glucose = None
+        insulin = None
+        comment_parts = []
+        
+        for n in numbers:
+            if glucose is None and 1 <= n <= 30:
+                glucose = n
+            elif insulin is None and n > 0:
+                insulin = int(n) if n.is_integer() else n
+        
+        # Если не нашли глюкозу, берём первое число
+        if glucose is None and numbers:
+            glucose = numbers[0]
+        
         glucose_type = detect_glucose_type(text)
         period = get_period_by_time()
         
+        # Удаляем числа и ключевые слова из комментария
         comment = re.sub(r'\d+[.,]?\d*', '', text)
+        comment = re.sub(r'инсулин|инсулина|ед|единиц|iu|ме|мед', '', comment, flags=re.IGNORECASE)
         comment = re.sub(r'натощак|через 2 часа после еды|перед едой|перед сном|ночью', '', comment, flags=re.IGNORECASE)
         comment = re.sub(r'[\s/]+', ' ', comment).strip()
         
-        save_glucose_to_excel(user_id, period, glucose, glucose_type, comment)
+        # Если есть доза инсулина, добавляем в комментарий
+        if insulin:
+            if comment:
+                comment = f"{comment}, инсулин {insulin} ед."
+            else:
+                comment = f"инсулин {insulin} ед."
+        
+        await save_glucose_to_db(user_id, period, glucose, glucose_type, comment)
         
         period_emoji = {"Утро": "🌅", "День": "☀️", "Вечер": "🌙"}
         now = datetime.now(MSK_PLUS_1)
@@ -750,7 +765,9 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
         response = f"✅ Записано! {period_emoji.get(period, '')} {period}: глюкоза {glucose}"
         if glucose_type != "без указания":
             response += f" ({glucose_type})"
-        if comment:
+        if insulin:
+            response += f", инсулин {insulin} ед."
+        if comment and not comment.startswith("инсулин"):
             response += f"\n📝 {comment}"
         response += f"\n📅 {now.strftime('%d-%m-%Y %H:%M:%S')}"
         
@@ -778,6 +795,7 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
             "120 80 - давление\n"
             "120 80 68 - давление и пульс\n"
             "5.5 - глюкоза\n"
+            "9,2 инсулин 10 - глюкоза и инсулин\n"
             "120 80 выпил таблетку - с комментарием"
         )
         return
@@ -791,7 +809,7 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
     comment = re.sub(r'[\s/]+', ' ', comment).strip()
     
     period = get_period_by_time()
-    save_pressure_to_excel(user_id, period, systolic, diastolic, pulse, comment)
+    await save_pressure_to_db(user_id, period, systolic, diastolic, pulse, comment)
     
     period_emoji = {"Утро": "🌅", "День": "☀️", "Вечер": "🌙"}
     now = datetime.now(MSK_PLUS_1)
@@ -805,6 +823,46 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
     
     await update.message.reply_text(response)
 
+# ==================== ВОССТАНОВЛЕНИЕ ИЗ SQL ДАМПА ====================
+async def handle_restore_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик загруженного SQL файла для восстановления"""
+    if not is_admin(update.effective_user.id):
+        return
+    
+    if context.user_data.get('awaiting_restore') != 'sql':
+        return
+    
+    document = update.message.document
+    if not document or not document.file_name.endswith('.sql'):
+        await update.message.reply_text("❌ Пожалуйста, отправьте SQL дамп (созданный командой /backup)")
+        return
+    
+    try:
+        file = await context.bot.get_file(document.file_id)
+        
+        temp_file = f"temp_restore_{datetime.now(MSK_PLUS_1).strftime('%Y%m%d_%H%M%S')}.sql"
+        await file.download_to_drive(temp_file)
+        
+        import subprocess
+        result = subprocess.run(
+            ['psql', DATABASE_URL, '-f', temp_file],
+            capture_output=True,
+            text=True
+        )
+        
+        os.remove(temp_file)
+        
+        if result.returncode != 0:
+            await update.message.reply_text(f"❌ Ошибка при восстановлении: {result.stderr}")
+        else:
+            await update.message.reply_text(f"✅ Данные восстановлены из файла {document.file_name}")
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка при восстановлении: {e}")
+    finally:
+        context.user_data['awaiting_restore'] = None
+
+# ==================== НАПОМИНАНИЯ ====================
 async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
     """Отправляет напоминания всем активным пользователям"""
     now_time = datetime.now(MSK_PLUS_1)
@@ -815,12 +873,12 @@ async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
     
     print(f"[{now_time.strftime('%Y-%m-%d %H:%M:%S')}] Запуск напоминаний, час: {current_hour}")
     
-    users = get_all_users()
+    users = await get_all_users()
     sent_count = 0
     active_count = 0
     
     for uid, data in users.items():
-        if check_access(int(uid)):
+        if await check_access(int(uid)):
             active_count += 1
             try:
                 await context.bot.send_message(
@@ -830,7 +888,8 @@ async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
                          "• 120 80 - давление\n"
                          "• 120 80 68 - давление и пульс\n"
                          "• 5.5 - глюкоза\n"
-                         "• 5.5 натощак - глюкоза с типом замера"
+                         "• 5.5 натощак - глюкоза с типом замера\n"
+                         "• 9,2 инсулин 10 - глюкоза и доза инсулина"
                 )
                 sent_count += 1
                 print(f"  → Напоминание отправлено пользователю {uid}")
@@ -839,6 +898,7 @@ async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
     
     print(f"Активных пользователей: {active_count}, отправлено напоминаний: {sent_count}")
 
+# ==================== КОМАНДЫ МЕНЮ ====================
 async def set_commands(app):
     admin_commands = [
         BotCommand("start", "Главное меню"),
@@ -850,8 +910,8 @@ async def set_commands(app):
         BotCommand("users", "Список пользователей"),
         BotCommand("users_excel", "Выгрузить пользователей в Excel"),
         BotCommand("grant", "Выдать доступ (username дни)"),
-        BotCommand("backup", "Резервная копия данных"),
-        BotCommand("restore", "Восстановить данные"),
+        BotCommand("backup", "Резервная копия БД"),
+        BotCommand("restore", "Восстановить БД"),
         BotCommand("status", "Статус бота"),
         BotCommand("test_remind", "Тест напоминаний"),
     ]
@@ -867,8 +927,12 @@ async def set_commands(app):
     await app.bot.set_my_commands(default_commands)
     await app.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
 
-def main():
-    init_excel()
+# ==================== ЗАПУСК ====================
+async def main_async():
+    global db_pool
+    
+    # Инициализация БД
+    await init_db()
     
     app = Application.builder().token(TOKEN).build()
     
@@ -897,7 +961,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, handle_restore_file))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pressure_glucose))
     
-    asyncio.get_event_loop().run_until_complete(set_commands(app))
+    await set_commands(app)
     
     job_queue = app.job_queue
     if job_queue:
@@ -909,7 +973,10 @@ def main():
         print("ОШИБКА: job_queue не создан! Напоминания работать не будут")
     
     print("Бот запущен")
-    app.run_polling()
+    await app.run_polling()
+
+def main():
+    asyncio.run(main_async())
 
 if __name__ == "__main__":
     main()
