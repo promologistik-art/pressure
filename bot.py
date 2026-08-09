@@ -1262,6 +1262,22 @@ async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
 # ==================== КОМАНДЫ МЕНЮ ====================
 async def set_commands(app: Application) -> None:
     """Устанавливает команды для бота"""
+    
+    # Команды для всех пользователей
+    default_commands = [
+        BotCommand("start", "Главное меню"),
+        BotCommand("table", "Excel журнал (давление+глюкоза)"),
+        BotCommand("report", "Отчет по давлению за сегодня"),
+        BotCommand("glucose_report", "Отчет по глюкозе за сегодня"),
+        BotCommand("help", "Помощь"),
+        BotCommand("add_patient", "Добавить пациента"),
+        BotCommand("remove_patient", "Удалить пациента"),
+        BotCommand("patients", "Список пациентов"),
+        BotCommand("view", "Просмотреть журнал пациента"),
+        BotCommand("view_excel", "Скачать Excel пациента"),
+    ]
+    
+    # Команды для админа (все команды + админские)
     admin_commands = [
         BotCommand("start", "Главное меню"),
         BotCommand("table", "Excel журнал (давление+глюкоза)"),
@@ -1283,29 +1299,11 @@ async def set_commands(app: Application) -> None:
         BotCommand("test_remind", "Тест напоминаний"),
     ]
     
-    mentor_commands = [
-        BotCommand("start", "Главное меню"),
-        BotCommand("table", "Excel журнал (давление+глюкоза)"),
-        BotCommand("report", "Отчет по давлению за сегодня"),
-        BotCommand("glucose_report", "Отчет по глюкозе за сегодня"),
-        BotCommand("help", "Помощь"),
-        BotCommand("add_patient", "Добавить пациента"),
-        BotCommand("remove_patient", "Удалить пациента"),
-        BotCommand("patients", "Список пациентов"),
-        BotCommand("view", "Просмотреть журнал пациента"),
-        BotCommand("view_excel", "Скачать Excel пациента"),
-    ]
-    
-    default_commands = [
-        BotCommand("start", "Главное меню"),
-        BotCommand("table", "Excel журнал (давление+глюкоза)"),
-        BotCommand("report", "Отчет по давлению за сегодня"),
-        BotCommand("glucose_report", "Отчет по глюкозе за сегодня"),
-        BotCommand("help", "Помощь"),
-    ]
-    
+    # Устанавливаем команды для всех
     await app.bot.set_my_commands(default_commands)
-    await app.bot.set_my_commands(mentor_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
+    
+    # Дополнительные команды только для админа
+    await app.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
 
 # ==================== ЗАПУСК ====================
 def main() -> None:
