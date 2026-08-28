@@ -68,7 +68,7 @@ async def init_db() -> None:
             )
         ''')
         
-        # Таблица глюкозы
+        # Таблица глюкозы с новыми полями для инсулина
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS glucose (
                 id SERIAL PRIMARY KEY,
@@ -79,25 +79,27 @@ async def init_db() -> None:
                 glucose_value DECIMAL(4,1),
                 glucose_type TEXT,
                 comment TEXT,
+                insulin_dose DECIMAL(4,1),
+                insulin_recommendation TEXT,
                 created_at TIMESTAMP DEFAULT NOW()
             )
         ''')
         
-        # Новая таблица: связь наставник-пациент
+        # Таблица: связь наставник-подопечный
         await conn.execute('''
-            CREATE TABLE IF NOT EXISTS mentor_patients (
+            CREATE TABLE IF NOT EXISTS mentor_students (
                 mentor_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
-                patient_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
+                student_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
                 created_at TIMESTAMP DEFAULT NOW(),
-                PRIMARY KEY (mentor_id, patient_id)
+                PRIMARY KEY (mentor_id, student_id)
             )
         ''')
         
         # Индексы
         await conn.execute('CREATE INDEX IF NOT EXISTS idx_pressure_user_id ON pressure(user_id)')
         await conn.execute('CREATE INDEX IF NOT EXISTS idx_glucose_user_id ON glucose(user_id)')
-        await conn.execute('CREATE INDEX IF NOT EXISTS idx_mentor_patients_mentor ON mentor_patients(mentor_id)')
-        await conn.execute('CREATE INDEX IF NOT EXISTS idx_mentor_patients_patient ON mentor_patients(patient_id)')
+        await conn.execute('CREATE INDEX IF NOT EXISTS idx_mentor_students_mentor ON mentor_students(mentor_id)')
+        await conn.execute('CREATE INDEX IF NOT EXISTS idx_mentor_students_student ON mentor_students(student_id)')
         
         print("✅ Таблицы созданы/проверены")
 
@@ -225,104 +227,98 @@ def is_admin(user_id: int) -> bool:
     """Проверяет, является ли пользователь администратором"""
     return user_id == ADMIN_ID
 
-# ==================== РАБОТА С НАСТАВНИКАМИ И ПАЦИЕНТАМИ ====================
-async def add_patient(mentor_id: int, patient_username: str) -> Tuple[bool, str]:
+# ==================== РАБОТА С НАСТАВНИКАМИ И ПОДОПЕЧНЫМИ ====================
+async def add_student(mentor_id: int, student_username: str) -> Tuple[bool, str]:
     """
-    Добавляет пациента наставнику.
+    Добавляет подопечного наставнику.
     Возвращает (успех, сообщение)
     """
-    # Проверяем, существует ли пользователь
-    patient_id = await get_user_by_username(patient_username)
-    if not patient_id:
-        return False, f"❌ Пользователь @{patient_username} не найден в системе."
+    student_id = await get_user_by_username(student_username)
+    if not student_id:
+        return False, f"❌ Пользователь @{student_username} не найден в системе."
     
-    if patient_id == mentor_id:
-        return False, "❌ Нельзя добавить самого себя в пациенты."
+    if student_id == mentor_id:
+        return False, "❌ Нельзя добавить самого себя в подопечные."
     
-    # Проверяем, не является ли уже пациентом
     async with db_pool.acquire() as conn:
         exists = await conn.fetchrow(
-            'SELECT 1 FROM mentor_patients WHERE mentor_id = $1 AND patient_id = $2',
-            mentor_id, patient_id
+            'SELECT 1 FROM mentor_students WHERE mentor_id = $1 AND student_id = $2',
+            mentor_id, student_id
         )
         if exists:
-            return False, f"❌ Пользователь @{patient_username} уже является вашим пациентом."
+            return False, f"❌ Пользователь @{student_username} уже является вашим подопечным."
         
         await conn.execute(
-            'INSERT INTO mentor_patients (mentor_id, patient_id) VALUES ($1, $2)',
-            mentor_id, patient_id
+            'INSERT INTO mentor_students (mentor_id, student_id) VALUES ($1, $2)',
+            mentor_id, student_id
         )
     
-    return True, f"✅ Пользователь @{patient_username} добавлен в ваши пациенты."
+    return True, f"✅ Пользователь @{student_username} добавлен в ваши подопечные."
 
-async def remove_patient(mentor_id: int, patient_username: str) -> Tuple[bool, str]:
-    """Удаляет пациента у наставника"""
-    patient_id = await get_user_by_username(patient_username)
-    if not patient_id:
-        return False, f"❌ Пользователь @{patient_username} не найден."
+async def remove_student(mentor_id: int, student_username: str) -> Tuple[bool, str]:
+    """Удаляет подопечного у наставника"""
+    student_id = await get_user_by_username(student_username)
+    if not student_id:
+        return False, f"❌ Пользователь @{student_username} не найден."
     
     async with db_pool.acquire() as conn:
         result = await conn.execute(
-            'DELETE FROM mentor_patients WHERE mentor_id = $1 AND patient_id = $2',
-            mentor_id, patient_id
+            'DELETE FROM mentor_students WHERE mentor_id = $1 AND student_id = $2',
+            mentor_id, student_id
         )
         if result == "DELETE 0":
-            return False, f"❌ Пользователь @{patient_username} не является вашим пациентом."
+            return False, f"❌ Пользователь @{student_username} не является вашим подопечным."
     
-    return True, f"✅ Пользователь @{patient_username} удалён из ваших пациентов."
+    return True, f"✅ Пользователь @{student_username} удалён из ваших подопечных."
 
-async def get_mentor_patients(mentor_id: int) -> List[Dict[str, Any]]:
-    """Возвращает список пациентов наставника"""
+async def get_mentor_students(mentor_id: int) -> List[Dict[str, Any]]:
+    """Возвращает список подопечных наставника"""
     async with db_pool.acquire() as conn:
         rows = await conn.fetch('''
-            SELECT u.user_id, u.username, u.joined, mp.created_at
-            FROM mentor_patients mp
-            JOIN users u ON mp.patient_id = u.user_id
-            WHERE mp.mentor_id = $1
-            ORDER BY mp.created_at DESC
+            SELECT u.user_id, u.username, u.joined, ms.created_at
+            FROM mentor_students ms
+            JOIN users u ON ms.student_id = u.user_id
+            WHERE ms.mentor_id = $1
+            ORDER BY ms.created_at DESC
         ''', mentor_id)
         
-        patients = []
+        students = []
         for row in rows:
-            patients.append({
+            students.append({
                 "user_id": row['user_id'],
                 "username": row['username'],
                 "joined": row['joined'].strftime("%d-%m-%Y %H:%M:%S") if row['joined'] else None,
                 "added_at": row['created_at'].strftime("%d-%m-%Y %H:%M:%S") if row['created_at'] else None
             })
-        return patients
+        return students
 
-async def is_mentor_for_patient(mentor_id: int, patient_id: int) -> bool:
-    """Проверяет, является ли пользователь наставником для пациента"""
+async def is_mentor_for_student(mentor_id: int, student_id: int) -> bool:
+    """Проверяет, является ли пользователь наставником для подопечного"""
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
-            'SELECT 1 FROM mentor_patients WHERE mentor_id = $1 AND patient_id = $2',
-            mentor_id, patient_id
+            'SELECT 1 FROM mentor_students WHERE mentor_id = $1 AND student_id = $2',
+            mentor_id, student_id
         )
         return row is not None
 
-async def get_patient_mentors(patient_id: int) -> List[int]:
-    """Возвращает список наставников пациента"""
+async def get_student_mentors(student_id: int) -> List[int]:
+    """Возвращает список наставников подопечного"""
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
-            'SELECT mentor_id FROM mentor_patients WHERE patient_id = $1',
-            patient_id
+            'SELECT mentor_id FROM mentor_students WHERE student_id = $1',
+            student_id
         )
         return [row['mentor_id'] for row in rows]
 
-async def notify_mentors_about_measurement(patient_id: int, measurement_type: str, value: str, app: Application) -> None:
-    """
-    Уведомляет всех наставников пациента о новом замере.
-    measurement_type: 'давление' или 'глюкоза'
-    """
-    mentors = await get_patient_mentors(patient_id)
+async def notify_mentors_about_measurement(student_id: int, measurement_type: str, value: str, app: Application) -> None:
+    """Уведомляет всех наставников подопечного о новом замере"""
+    mentors = await get_student_mentors(student_id)
     if not mentors:
         return
     
-    # Получаем информацию о пациенте
     users = await get_all_users()
-    patient_info = users.get(str(patient_id), {})
-    patient_username = patient_info.get('username', 'Неизвестный пользователь')
+    student_info = users.get(str(student_id), {})
+    student_username = student_info.get('username', 'Неизвестный пользователь')
     
     now = datetime.now(MSK_PLUS_1).strftime('%d-%m-%Y %H:%M:%S')
     
@@ -330,7 +326,7 @@ async def notify_mentors_about_measurement(patient_id: int, measurement_type: st
         try:
             await app.bot.send_message(
                 chat_id=mentor_id,
-                text=f"📊 Новый замер от пациента @{patient_username}\n\n"
+                text=f"📊 Новый замер от подопечного @{student_username}\n\n"
                      f"📝 Тип: {measurement_type}\n"
                      f"📊 Показания: {value}\n"
                      f"🕐 Время: {now}"
@@ -338,38 +334,87 @@ async def notify_mentors_about_measurement(patient_id: int, measurement_type: st
         except Exception as e:
             print(f"❌ Не удалось уведомить наставника {mentor_id}: {e}")
 
+# ==================== РАСЧЁТ ИНСУЛИНА ====================
+def calculate_insulin_recommendation(period: str, glucose_value: float, user_dose: Optional[float] = None) -> Dict[str, Any]:
+    """
+    Рассчитывает рекомендацию по инсулину.
+    Возвращает словарь с рекомендацией.
+    """
+    # Базовые параметры
+    if period == "Утро":
+        target = 7.0
+        base_dose = 10.0
+    elif period == "Вечер":
+        target = 13.0
+        base_dose = 8.0
+    else:
+        # Для "День" используем вечерние параметры
+        target = 13.0
+        base_dose = 8.0
+    
+    # Используем дозу пользователя или базовую
+    current_dose = user_dose if user_dose is not None else base_dose
+    
+    # Вычисляем отклонение
+    deviation = glucose_value - target
+    adjustment = 0
+    recommended_dose = current_dose
+    recommendation_text = ""
+    
+    if deviation >= 1.0:
+        adjustment = 2
+        recommended_dose = current_dose + 2
+        recommendation_text = f"Целевой сахар: {target}\nТекущий сахар: {glucose_value} (выше на {deviation:.1f})\nВаша доза: {current_dose:.0f} ед.\n→ +2 ед.\n✅ Рекомендуемая доза: {recommended_dose:.0f} ед."
+    elif deviation <= -1.0:
+        adjustment = -2
+        recommended_dose = current_dose - 2
+        recommendation_text = f"Целевой сахар: {target}\nТекущий сахар: {glucose_value} (ниже на {abs(deviation):.1f})\nВаша доза: {current_dose:.0f} ед.\n→ -2 ед.\n✅ Рекомендуемая доза: {recommended_dose:.0f} ед."
+    else:
+        recommendation_text = f"Целевой сахар: {target}\nТекущий сахар: {glucose_value} (в пределах нормы)\nВаша доза: {current_dose:.0f} ед.\n→ без изменений\n✅ Рекомендуемая доза: {current_dose:.0f} ед."
+    
+    return {
+        "period": period,
+        "target": target,
+        "base_dose": base_dose,
+        "current_dose": current_dose,
+        "glucose_value": glucose_value,
+        "deviation": deviation,
+        "adjustment": adjustment,
+        "recommended_dose": recommended_dose,
+        "recommendation_text": recommendation_text,
+        "user_provided_dose": user_dose is not None
+    }
+
 # ==================== ПОЛУЧЕНИЕ ДАННЫХ ДЛЯ ПРОСМОТРА ====================
-async def get_patient_full_history(patient_id: int) -> str:
-    """Возвращает полную историю замеров пациента в текстовом формате"""
+async def get_student_full_history(student_id: int) -> str:
+    """Возвращает полную историю замеров подопечного в текстовом формате"""
     async with db_pool.acquire() as conn:
-        # Получаем давление
         pressure_rows = await conn.fetch('''
             SELECT date, time, period, systolic, diastolic, pulse, comment 
             FROM pressure 
             WHERE user_id = $1 
             ORDER BY date DESC, time DESC
             LIMIT 50
-        ''', patient_id)
+        ''', student_id)
         
-        # Получаем глюкозу
         glucose_rows = await conn.fetch('''
-            SELECT date, time, period, glucose_value, glucose_type, comment 
+            SELECT date, time, period, glucose_value, glucose_type, comment, insulin_dose, insulin_recommendation
             FROM glucose 
             WHERE user_id = $1 
             ORDER BY date DESC, time DESC
             LIMIT 50
-        ''', patient_id)
+        ''', student_id)
     
     if not pressure_rows and not glucose_rows:
-        return "📊 У пациента пока нет записей."
+        return "📊 У подопечного пока нет записей."
     
-    result = "📊 ПОЛНЫЙ ЖУРНАЛ ПАЦИЕНТА\n"
+    result = "📊 ПОЛНЫЙ ЖУРНАЛ ПОДОПЕЧНОГО\n"
     result += "=" * 40 + "\n\n"
     
     if pressure_rows:
         result += "🩸 ДАВЛЕНИЕ (последние 50 записей):\n"
         result += "-" * 30 + "\n"
-        for row in pressure_rows[:20]:  # Показываем только 20 последних
+        for row in pressure_rows[:20]:
             result += f"📅 {row['date'].strftime('%d-%m-%Y')} {row['time'].strftime('%H:%M:%S')} "
             result += f"({row['period']}): {row['systolic']}/{row['diastolic']}"
             if row['pulse']:
@@ -391,14 +436,18 @@ async def get_patient_full_history(patient_id: int) -> str:
                 result += f" ({row['glucose_type']})"
             if row['comment']:
                 result += f"\n   📝 {row['comment']}"
+            if row['insulin_dose']:
+                result += f"\n   💉 Доза: {float(row['insulin_dose'])} ед."
+            if row['insulin_recommendation']:
+                result += f"\n   📋 {row['insulin_recommendation']}"
             result += "\n"
         if len(glucose_rows) > 20:
             result += f"\n... и ещё {len(glucose_rows) - 20} записей\n"
     
     return result
 
-async def generate_patient_excel(patient_id: int) -> str:
-    """Генерирует Excel файл с данными пациента (давление и глюкоза)"""
+async def generate_student_excel(student_id: int) -> str:
+    """Генерирует Excel файл с данными подопечного (давление и глюкоза)"""
     wb = Workbook()
     
     ws_pressure = wb.create_sheet("Давление", 0)
@@ -419,14 +468,14 @@ async def generate_patient_excel(patient_id: int) -> str:
         ws_pressure.column_dimensions[col_letter].width = width
     ws_pressure.row_dimensions[1].height = 20
     
-    # Заголовки для глюкозы
-    headers_glucose = ['Дата', 'Время', 'Период', 'Глюкоза', 'Тип замера', 'Комментарий']
+    # Заголовки для глюкозы (с новыми столбцами для инсулина)
+    headers_glucose = ['Дата', 'Время', 'Период', 'Глюкоза', 'Тип замера', 'Комментарий', 'Доза инсулина', 'Рекомендация']
     for col, header in enumerate(headers_glucose, 1):
         cell = ws_glucose.cell(row=1, column=col, value=header)
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal='center', vertical='center')
     
-    col_widths_glucose = {'A': 12, 'B': 10, 'C': 8, 'D': 10, 'E': 25, 'F': 40}
+    col_widths_glucose = {'A': 12, 'B': 10, 'C': 8, 'D': 10, 'E': 25, 'F': 40, 'G': 15, 'H': 50}
     for col_letter, width in col_widths_glucose.items():
         ws_glucose.column_dimensions[col_letter].width = width
     ws_glucose.row_dimensions[1].height = 20
@@ -438,7 +487,7 @@ async def generate_patient_excel(patient_id: int) -> str:
             FROM pressure 
             WHERE user_id = $1 
             ORDER BY date DESC, time DESC
-        ''', patient_id)
+        ''', student_id)
         
         row_num = 2
         for row in rows:
@@ -453,11 +502,11 @@ async def generate_patient_excel(patient_id: int) -> str:
         
         # Глюкоза
         rows = await conn.fetch('''
-            SELECT date, time, period, glucose_value, glucose_type, comment 
+            SELECT date, time, period, glucose_value, glucose_type, comment, insulin_dose, insulin_recommendation
             FROM glucose 
             WHERE user_id = $1 
             ORDER BY date DESC, time DESC
-        ''', patient_id)
+        ''', student_id)
         
         row_num = 2
         for row in rows:
@@ -467,6 +516,8 @@ async def generate_patient_excel(patient_id: int) -> str:
             ws_glucose.cell(row=row_num, column=4, value=float(row['glucose_value']))
             ws_glucose.cell(row=row_num, column=5, value=row['glucose_type'] if row['glucose_type'] else "")
             ws_glucose.cell(row=row_num, column=6, value=row['comment'] if row['comment'] else "")
+            ws_glucose.cell(row=row_num, column=7, value=float(row['insulin_dose']) if row['insulin_dose'] else "")
+            ws_glucose.cell(row=row_num, column=8, value=row['insulin_recommendation'] if row['insulin_recommendation'] else "")
             row_num += 1
     
     with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
@@ -506,6 +557,20 @@ def detect_glucose_type(text: str) -> str:
             return "натощак"
         return "без указания"
 
+def extract_insulin_dose(text: str) -> Optional[float]:
+    """Извлекает дозу инсулина из текста (формат: инсулин Xед или X ед)"""
+    patterns = [
+        r'инсулин\s*(\d+[.,]?\d*)\s*ед',
+        r'инсулин\s*(\d+[.,]?\d*)',
+        r'(\d+[.,]?\d*)\s*ед\s*инсулин',
+        r'(\d+[.,]?\d*)\s*ед'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return float(match.group(1).replace(',', '.'))
+    return None
+
 async def save_pressure_to_db(user_id: int, period: str, systolic: int, diastolic: int, pulse: int, comment: str) -> None:
     """Сохраняет показания давления в БД"""
     now = datetime.now(MSK_PLUS_1)
@@ -523,7 +588,7 @@ async def save_pressure_to_db(user_id: int, period: str, systolic: int, diastoli
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ''', user_id, date_val, time_val, period, systolic, diastolic, pulse, comment)
 
-async def save_glucose_to_db(user_id: int, period: str, glucose: float, glucose_type: str, comment: str) -> None:
+async def save_glucose_to_db(user_id: int, period: str, glucose: float, glucose_type: str, comment: str, insulin_dose: Optional[float] = None, insulin_recommendation: Optional[str] = None) -> None:
     """Сохраняет показания глюкозы в БД"""
     now = datetime.now(MSK_PLUS_1)
     
@@ -536,9 +601,9 @@ async def save_glucose_to_db(user_id: int, period: str, glucose: float, glucose_
     
     async with db_pool.acquire() as conn:
         await conn.execute('''
-            INSERT INTO glucose (user_id, date, time, period, glucose_value, glucose_type, comment)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-        ''', user_id, date_val, time_val, period, glucose, glucose_type, comment)
+            INSERT INTO glucose (user_id, date, time, period, glucose_value, glucose_type, comment, insulin_dose, insulin_recommendation)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ''', user_id, date_val, time_val, period, glucose, glucose_type, comment, insulin_dose, insulin_recommendation)
 
 async def get_today_pressure_report(user_id: int) -> str:
     """Возвращает отчёт по давлению за сегодня"""
@@ -575,7 +640,7 @@ async def get_today_glucose_report(user_id: int) -> str:
     
     async with db_pool.acquire() as conn:
         rows = await conn.fetch('''
-            SELECT date, time, period, glucose_value, glucose_type, comment 
+            SELECT date, time, period, glucose_value, glucose_type, comment, insulin_dose, insulin_recommendation
             FROM glucose 
             WHERE user_id = $1 AND date = $2
             ORDER BY time ASC
@@ -594,6 +659,10 @@ async def get_today_glucose_report(user_id: int) -> str:
             report += f" ({row['glucose_type']})"
         if row['comment']:
             report += f"\n   📝 {row['comment']}"
+        if row['insulin_dose']:
+            report += f"\n   💉 Доза: {float(row['insulin_dose'])} ед."
+        if row['insulin_recommendation']:
+            report += f"\n   📋 {row['insulin_recommendation']}"
         report += "\n\n"
     
     return report
@@ -796,55 +865,55 @@ async def test_remind_all(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(f"✅ Тестовое напоминание отправлено {sent} пользователям")
 
 # ==================== КОМАНДЫ НАСТАВНИКА ====================
-async def add_patient_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Добавить пациента (команда для наставника)"""
+async def add_student_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Добавить подопечного (команда для наставника)"""
     user_id = update.effective_user.id
     
     args = context.args
     if len(args) < 1:
         await update.message.reply_text(
-            "📝 Используйте: /add_patient @username\n"
-            "Пример: /add_patient @john_doe"
+            "📝 Используйте: /add_student @username\n"
+            "Пример: /add_student @john_doe"
         )
         return
     
     username = args[0].lstrip('@')
     
-    success, message = await add_patient(user_id, username)
+    success, message = await add_student(user_id, username)
     await update.message.reply_text(message)
 
-async def remove_patient_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Удалить пациента (команда для наставника)"""
+async def remove_student_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Удалить подопечного (команда для наставника)"""
     user_id = update.effective_user.id
     
     args = context.args
     if len(args) < 1:
         await update.message.reply_text(
-            "📝 Используйте: /remove_patient @username\n"
-            "Пример: /remove_patient @john_doe"
+            "📝 Используйте: /remove_student @username\n"
+            "Пример: /remove_student @john_doe"
         )
         return
     
     username = args[0].lstrip('@')
     
-    success, message = await remove_patient(user_id, username)
+    success, message = await remove_student(user_id, username)
     await update.message.reply_text(message)
 
-async def list_patients_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Показать список пациентов (команда для наставника)"""
+async def list_students_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показать список подопечных (команда для наставника)"""
     user_id = update.effective_user.id
     
-    patients = await get_mentor_patients(user_id)
+    students = await get_mentor_students(user_id)
     
-    if not patients:
-        await update.message.reply_text("📋 У вас пока нет пациентов.\n\nДобавьте командой /add_patient @username")
+    if not students:
+        await update.message.reply_text("📋 У вас пока нет подопечных.\n\nДобавьте командой /add_student @username")
         return
     
-    text = "📋 ВАШИ ПАЦИЕНТЫ:\n\n"
-    for i, patient in enumerate(patients, 1):
-        text += f"{i}. @{patient['username']}\n"
-        text += f"   🆔 ID: {patient['user_id']}\n"
-        text += f"   📅 Добавлен: {patient['added_at']}\n\n"
+    text = "📋 ВАШИ ПОДОПЕЧНЫЕ:\n\n"
+    for i, student in enumerate(students, 1):
+        text += f"{i}. @{student['username']}\n"
+        text += f"   🆔 ID: {student['user_id']}\n"
+        text += f"   📅 Добавлен: {student['added_at']}\n\n"
     
     text += "\nКоманды для просмотра:\n"
     text += "/view @username - просмотреть журнал\n"
@@ -852,8 +921,8 @@ async def list_patients_command(update: Update, context: ContextTypes.DEFAULT_TY
     
     await update.message.reply_text(text)
 
-async def view_patient_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Просмотреть данные пациента (команда для наставника)"""
+async def view_student_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Просмотреть данные подопечного (команда для наставника)"""
     mentor_id = update.effective_user.id
     
     args = context.args
@@ -866,22 +935,19 @@ async def view_patient_command(update: Update, context: ContextTypes.DEFAULT_TYP
     
     username = args[0].lstrip('@')
     
-    # Проверяем, существует ли пользователь
-    patient_id = await get_user_by_username(username)
-    if not patient_id:
+    student_id = await get_user_by_username(username)
+    if not student_id:
         await update.message.reply_text(f"❌ Пользователь @{username} не найден.")
         return
     
-    # Проверяем, является ли пациентом наставника
-    if not await is_mentor_for_patient(mentor_id, patient_id):
-        await update.message.reply_text(f"❌ Пользователь @{username} не является вашим пациентом.")
+    if not await is_mentor_for_student(mentor_id, student_id):
+        await update.message.reply_text(f"❌ Пользователь @{username} не является вашим подопечным.")
         return
     
-    await update.message.reply_text("📊 Загружаю данные пациента...")
+    await update.message.reply_text("📊 Загружаю данные подопечного...")
     
-    history = await get_patient_full_history(patient_id)
+    history = await get_student_full_history(student_id)
     
-    # Если текст слишком длинный, отправляем по частям
     if len(history) > 4000:
         parts = [history[i:i+4000] for i in range(0, len(history), 4000)]
         for part in parts:
@@ -889,8 +955,8 @@ async def view_patient_command(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await update.message.reply_text(history)
 
-async def view_patient_excel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Выгрузить Excel-файл пациента (команда для наставника)"""
+async def view_student_excel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Выгрузить Excel-файл подопечного (команда для наставника)"""
     mentor_id = update.effective_user.id
     
     args = context.args
@@ -903,27 +969,25 @@ async def view_patient_excel_command(update: Update, context: ContextTypes.DEFAU
     
     username = args[0].lstrip('@')
     
-    # Проверяем, существует ли пользователь
-    patient_id = await get_user_by_username(username)
-    if not patient_id:
+    student_id = await get_user_by_username(username)
+    if not student_id:
         await update.message.reply_text(f"❌ Пользователь @{username} не найден.")
         return
     
-    # Проверяем, является ли пациентом наставника
-    if not await is_mentor_for_patient(mentor_id, patient_id):
-        await update.message.reply_text(f"❌ Пользователь @{username} не является вашим пациентом.")
+    if not await is_mentor_for_student(mentor_id, student_id):
+        await update.message.reply_text(f"❌ Пользователь @{username} не является вашим подопечным.")
         return
     
-    await update.message.reply_text("📊 Генерирую Excel-файл пациента...")
+    await update.message.reply_text("📊 Генерирую Excel-файл подопечного...")
     
     try:
-        filename = await generate_patient_excel(patient_id)
+        filename = await generate_student_excel(student_id)
         
         with open(filename, 'rb') as f:
             await update.message.reply_document(
                 document=f,
-                filename=f"patient_{username}_{datetime.now(MSK_PLUS_1).strftime('%Y%m%d')}.xlsx",
-                caption=f"📊 Данные пациента @{username}\nДата выгрузки: {datetime.now(MSK_PLUS_1).strftime('%d-%m-%Y %H:%M:%S')}"
+                filename=f"student_{username}_{datetime.now(MSK_PLUS_1).strftime('%Y%m%d')}.xlsx",
+                caption=f"📊 Данные подопечного @{username}\nДата выгрузки: {datetime.now(MSK_PLUS_1).strftime('%d-%m-%Y %H:%M:%S')}"
             )
         
         os.remove(filename)
@@ -960,14 +1024,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• 5.5 - глюкоза (период определится автоматически)\n"
         "• 5.5 натощак - глюкоза с типом замера\n"
         "• 5.5 через 2 часа после еды - глюкоза с типом замера\n"
-        "• 9,2 инсулин 10 - глюкоза и доза инсулина\n\n"
+        "• 8.5 инсулин 10ед - глюкоза с дозой инсулина\n\n"
         "🌅 Бот сам определит время суток (Утро, День, Вечер)\n"
+        "💉 Для глюкозы будет рассчитана рекомендация по инсулину\n"
         "💾 Все данные хранятся в защищённой базе данных\n\n"
         "📋 Если вы наставник, используйте команды:\n"
-        "/add_patient @username - добавить пациента\n"
-        "/patients - список пациентов\n"
-        "/view @username - просмотреть журнал пациента\n"
-        "/view_excel @username - скачать Excel-файл пациента\n\n"
+        "/add_student @username - добавить подопечного\n"
+        "/students - список подопечных\n"
+        "/view @username - просмотреть журнал подопечного\n"
+        "/view_excel @username - скачать Excel-файл подопечного\n\n"
         "Основные команды:\n"
         "/table - получить Excel файл (давление и глюкоза)\n"
         "/report - отчет по давлению за сегодня\n"
@@ -991,7 +1056,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• 5.5 - глюкоза\n"
         "• 5.5 натощак - глюкоза с типом замера\n"
         "• 5.5 через 2 часа после еды\n"
-        "• 9,2 инсулин 10 - глюкоза и доза инсулина\n\n"
+        "• 8.5 инсулин 10ед - глюкоза с дозой инсулина\n\n"
+        "💉 Рекомендация по инсулину:\n"
+        "• Утро: цель 7.0, базовая доза 10 ед.\n"
+        "• Вечер: цель 13.0, базовая доза 8 ед.\n"
+        "• Если сахар выше цели на ≥1 → +2 ед.\n"
+        "• Если сахар ниже цели на ≥1 → -2 ед.\n\n"
         "Рекомендации по измерению глюкозы:\n"
         "• Утром натощак\n"
         "• Перед каждым приёмом пищи\n"
@@ -1005,11 +1075,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/report - отчет по давлению за сегодня\n"
         "/glucose_report - отчет по глюкозе за сегодня\n\n"
         "📋 Команды наставника:\n"
-        "/add_patient @username - добавить пациента\n"
-        "/remove_patient @username - удалить пациента\n"
-        "/patients - список пациентов\n"
-        "/view @username - журнал пациента\n"
-        "/view_excel @username - Excel-файл пациента\n\n"
+        "/add_student @username - добавить подопечного\n"
+        "/remove_student @username - удалить подопечного\n"
+        "/students - список подопечных\n"
+        "/view @username - журнал подопечного\n"
+        "/view_excel @username - Excel-файл подопечного\n\n"
         f"📢 <a href='https://t.me/+MAuGbcnBQmgxZTIy'>Больше наших ботов в канале</a>"
     )
     
@@ -1034,7 +1104,7 @@ async def table_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text("🔄 Генерирую ваш Excel-файл...")
     
     try:
-        filename = await generate_patient_excel(user_id)
+        filename = await generate_student_excel(user_id)
         
         with open(filename, 'rb') as f:
             await update.message.reply_document(
@@ -1068,8 +1138,8 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
     text = update.message.text.strip()
     text_lower = text.lower()
     
-    # Проверяем, есть ли в тексте упоминание инсулина
-    is_insulin = any(word in text_lower for word in ["инсулин", "инсулина", "ед", "единиц", "iu", "ме", "мед", "единица"])
+    # Извлекаем дозу инсулина из текста
+    insulin_dose = extract_insulin_dose(text)
     
     # Ищем все числа (включая десятичные)
     numbers = re.findall(r'\d+[.,]?\d*', text)
@@ -1078,18 +1148,17 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
     # Формируем ответ для уведомления наставников
     response_value = ""
     
-    # Если есть инсулин или одно число 1-30 — это глюкоза
+    # Если есть упоминание инсулина или одно число 1-30 — это глюкоза
+    is_insulin = any(word in text_lower for word in ["инсулин", "инсулина", "ед", "единиц", "iu", "ме", "мед", "единица"])
+    
     if is_insulin or (len(numbers) >= 1 and 1 <= numbers[0] <= 30):
         # Это глюкоза
         glucose = None
-        insulin = None
-        comment_parts = []
         
         for n in numbers:
             if glucose is None and 1 <= n <= 30:
                 glucose = n
-            elif insulin is None and n > 0:
-                insulin = int(n) if n.is_integer() else n
+                break
         
         if glucose is None and numbers:
             glucose = numbers[0]
@@ -1103,13 +1172,19 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
         comment = re.sub(r'натощак|через 2 часа после еды|перед едой|перед сном|ночью', '', comment, flags=re.IGNORECASE)
         comment = re.sub(r'[\s/]+', ' ', comment).strip()
         
-        if insulin:
-            if comment:
-                comment = f"{comment}, инсулин {insulin} ед."
-            else:
-                comment = f"инсулин {insulin} ед."
+        # Рассчитываем рекомендацию по инсулину
+        insulin_rec = calculate_insulin_recommendation(period, glucose, insulin_dose)
         
-        await save_glucose_to_db(user_id, period, glucose, glucose_type, comment)
+        # Сохраняем в БД
+        await save_glucose_to_db(
+            user_id, 
+            period, 
+            glucose, 
+            glucose_type, 
+            comment, 
+            insulin_rec['current_dose'], 
+            insulin_rec['recommendation_text']
+        )
         
         period_emoji = {"Утро": "🌅", "День": "☀️", "Вечер": "🌙"}
         now = datetime.now(MSK_PLUS_1)
@@ -1117,13 +1192,15 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
         response_value = f"глюкоза {glucose}"
         if glucose_type != "без указания":
             response_value += f" ({glucose_type})"
-        if insulin:
-            response_value += f", инсулин {insulin} ед."
+        if insulin_dose:
+            response_value += f", доза {insulin_dose} ед."
         
-        response = f"✅ Записано! {period_emoji.get(period, '')} {period}: {response_value}"
-        if comment and not comment.startswith("инсулин"):
-            response += f"\n📝 {comment}"
-        response += f"\n📅 {now.strftime('%d-%m-%Y %H:%M:%S')}"
+        # Формируем ответ
+        response = f"✅ Записано! {period_emoji.get(period, '')} {period}: {response_value}\n"
+        response += f"📅 {now.strftime('%d-%m-%Y %H:%M:%S')}\n"
+        if comment:
+            response += f"📝 {comment}\n"
+        response += f"\n💉 Рекомендация по инсулину:\n{insulin_rec['recommendation_text']}"
         
         await update.message.reply_text(response)
         
@@ -1152,7 +1229,7 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
             "120 80 - давление\n"
             "120 80 68 - давление и пульс\n"
             "5.5 - глюкоза\n"
-            "9,2 инсулин 10 - глюкоза и инсулин\n"
+            "8.5 инсулин 10ед - глюкоза с дозой инсулина\n"
             "120 80 выпил таблетку - с комментарием"
         )
         return
@@ -1175,10 +1252,10 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
     if pulse:
         response_value += f", пульс {pulse}"
     
-    response = f"✅ Записано! {period_emoji.get(period, '')} {period}: {response_value}"
+    response = f"✅ Записано! {period_emoji.get(period, '')} {period}: {response_value}\n"
     if comment:
-        response += f"\n📝 {comment}"
-    response += f"\n📅 {now.strftime('%d-%m-%Y %H:%M:%S')}"
+        response += f"📝 {comment}\n"
+    response += f"📅 {now.strftime('%d-%m-%Y %H:%M:%S')}"
     
     await update.message.reply_text(response)
     
@@ -1250,7 +1327,7 @@ async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
                          "• 120 80 68 - давление и пульс\n"
                          "• 5.5 - глюкоза\n"
                          "• 5.5 натощак - глюкоза с типом замера\n"
-                         "• 9,2 инсулин 10 - глюкоза и доза инсулина"
+                         "• 8.5 инсулин 10ед - глюкоза с дозой инсулина"
                 )
                 sent_count += 1
                 print(f"  → Напоминание отправлено пользователю {uid}")
@@ -1270,25 +1347,25 @@ async def set_commands(app: Application) -> None:
         BotCommand("report", "Отчет по давлению за сегодня"),
         BotCommand("glucose_report", "Отчет по глюкозе за сегодня"),
         BotCommand("help", "Помощь"),
-        BotCommand("add_patient", "Добавить пациента"),
-        BotCommand("remove_patient", "Удалить пациента"),
-        BotCommand("patients", "Список пациентов"),
-        BotCommand("view", "Просмотреть журнал пациента"),
-        BotCommand("view_excel", "Скачать Excel пациента"),
+        BotCommand("add_student", "Добавить подопечного"),
+        BotCommand("remove_student", "Удалить подопечного"),
+        BotCommand("students", "Список подопечных"),
+        BotCommand("view", "Просмотреть журнал подопечного"),
+        BotCommand("view_excel", "Скачать Excel подопечного"),
     ]
     
-    # Команды для админа (все команды + админские)
+    # Команды для админа
     admin_commands = [
         BotCommand("start", "Главное меню"),
         BotCommand("table", "Excel журнал (давление+глюкоза)"),
         BotCommand("report", "Отчет по давлению за сегодня"),
         BotCommand("glucose_report", "Отчет по глюкозе за сегодня"),
         BotCommand("help", "Помощь"),
-        BotCommand("add_patient", "Добавить пациента"),
-        BotCommand("remove_patient", "Удалить пациента"),
-        BotCommand("patients", "Список пациентов"),
-        BotCommand("view", "Просмотреть журнал пациента"),
-        BotCommand("view_excel", "Скачать Excel пациента"),
+        BotCommand("add_student", "Добавить подопечного"),
+        BotCommand("remove_student", "Удалить подопечного"),
+        BotCommand("students", "Список подопечных"),
+        BotCommand("view", "Просмотреть журнал подопечного"),
+        BotCommand("view_excel", "Скачать Excel подопечного"),
         BotCommand("admin", "Админ панель"),
         BotCommand("users", "Список пользователей"),
         BotCommand("users_excel", "Выгрузить пользователей в Excel"),
@@ -1329,11 +1406,11 @@ def main() -> None:
     app.add_handler(CommandHandler("table", table_command))
     
     # Команды наставника
-    app.add_handler(CommandHandler("add_patient", add_patient_command))
-    app.add_handler(CommandHandler("remove_patient", remove_patient_command))
-    app.add_handler(CommandHandler("patients", list_patients_command))
-    app.add_handler(CommandHandler("view", view_patient_command))
-    app.add_handler(CommandHandler("view_excel", view_patient_excel_command))
+    app.add_handler(CommandHandler("add_student", add_student_command))
+    app.add_handler(CommandHandler("remove_student", remove_student_command))
+    app.add_handler(CommandHandler("students", list_students_command))
+    app.add_handler(CommandHandler("view", view_student_command))
+    app.add_handler(CommandHandler("view_excel", view_student_excel_command))
     
     # Админ команды
     app.add_handler(CommandHandler("admin", admin_panel))
