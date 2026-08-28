@@ -68,7 +68,7 @@ async def init_db() -> None:
             )
         ''')
         
-        # Таблица глюкозы с новыми полями для инсулина
+        # Таблица глюкозы
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS glucose (
                 id SERIAL PRIMARY KEY,
@@ -79,11 +79,28 @@ async def init_db() -> None:
                 glucose_value DECIMAL(4,1),
                 glucose_type TEXT,
                 comment TEXT,
-                insulin_dose DECIMAL(4,1),
-                insulin_recommendation TEXT,
                 created_at TIMESTAMP DEFAULT NOW()
             )
         ''')
+        
+        # Добавляем новые столбцы для инсулина если их нет
+        try:
+            await conn.execute('ALTER TABLE glucose ADD COLUMN insulin_dose DECIMAL(4,1)')
+            print("✅ Добавлен столбец insulin_dose")
+        except Exception as e:
+            if 'duplicate column' in str(e).lower() or 'already exists' in str(e).lower():
+                print("ℹ️ Столбец insulin_dose уже существует")
+            else:
+                print(f"⚠️ Ошибка при добавлении insulin_dose: {e}")
+        
+        try:
+            await conn.execute('ALTER TABLE glucose ADD COLUMN insulin_recommendation TEXT')
+            print("✅ Добавлен столбец insulin_recommendation")
+        except Exception as e:
+            if 'duplicate column' in str(e).lower() or 'already exists' in str(e).lower():
+                print("ℹ️ Столбец insulin_recommendation уже существует")
+            else:
+                print(f"⚠️ Ошибка при добавлении insulin_recommendation: {e}")
         
         # Таблица: связь наставник-подопечный
         await conn.execute('''
@@ -600,10 +617,20 @@ async def save_glucose_to_db(user_id: int, period: str, glucose: float, glucose_
     time_val = now.time()
     
     async with db_pool.acquire() as conn:
-        await conn.execute('''
-            INSERT INTO glucose (user_id, date, time, period, glucose_value, glucose_type, comment, insulin_dose, insulin_recommendation)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        ''', user_id, date_val, time_val, period, glucose, glucose_type, comment, insulin_dose, insulin_recommendation)
+        try:
+            await conn.execute('''
+                INSERT INTO glucose (user_id, date, time, period, glucose_value, glucose_type, comment, insulin_dose, insulin_recommendation)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ''', user_id, date_val, time_val, period, glucose, glucose_type, comment, insulin_dose, insulin_recommendation)
+        except Exception as e:
+            # Если столбцов нет - сохраняем без них
+            if 'column "insulin_dose" does not exist' in str(e) or 'column "insulin_recommendation" does not exist' in str(e):
+                await conn.execute('''
+                    INSERT INTO glucose (user_id, date, time, period, glucose_value, glucose_type, comment)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ''', user_id, date_val, time_val, period, glucose, glucose_type, comment)
+            else:
+                raise e
 
 async def get_today_pressure_report(user_id: int) -> str:
     """Возвращает отчёт по давлению за сегодня"""
