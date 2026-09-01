@@ -83,25 +83,6 @@ async def init_db() -> None:
             )
         ''')
         
-        # Добавляем новые столбцы для инсулина если их нет
-        try:
-            await conn.execute('ALTER TABLE glucose ADD COLUMN insulin_dose DECIMAL(4,1)')
-            print("✅ Добавлен столбец insulin_dose")
-        except Exception as e:
-            if 'duplicate column' in str(e).lower() or 'already exists' in str(e).lower():
-                print("ℹ️ Столбец insulin_dose уже существует")
-            else:
-                print(f"⚠️ Ошибка при добавлении insulin_dose: {e}")
-        
-        try:
-            await conn.execute('ALTER TABLE glucose ADD COLUMN insulin_recommendation TEXT')
-            print("✅ Добавлен столбец insulin_recommendation")
-        except Exception as e:
-            if 'duplicate column' in str(e).lower() or 'already exists' in str(e).lower():
-                print("ℹ️ Столбец insulin_recommendation уже существует")
-            else:
-                print(f"⚠️ Ошибка при добавлении insulin_recommendation: {e}")
-        
         # Таблица: связь наставник-подопечный
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS mentor_patients (
@@ -351,57 +332,6 @@ async def notify_mentors_about_measurement(patient_id: int, measurement_type: st
         except Exception as e:
             print(f"❌ Не удалось уведомить наставника {mentor_id}: {e}")
 
-# ==================== РАСЧЁТ ИНСУЛИНА ====================
-def calculate_insulin_recommendation(period: str, glucose_value: float, user_dose: Optional[float] = None) -> Dict[str, Any]:
-    """
-    Рассчитывает рекомендацию по инсулину.
-    Возвращает словарь с рекомендацией.
-    """
-    # Базовые параметры
-    if period == "Утро":
-        target = 7.0
-        base_dose = 10.0
-    elif period == "Вечер":
-        target = 13.0
-        base_dose = 8.0
-    else:
-        # Для "День" используем вечерние параметры
-        target = 13.0
-        base_dose = 8.0
-    
-    # Используем дозу пользователя или базовую
-    current_dose = user_dose if user_dose is not None else base_dose
-    
-    # Вычисляем отклонение
-    deviation = glucose_value - target
-    adjustment = 0
-    recommended_dose = current_dose
-    recommendation_text = ""
-    
-    if deviation >= 1.0:
-        adjustment = 2
-        recommended_dose = current_dose + 2
-        recommendation_text = f"Целевой сахар: {target}\nТекущий сахар: {glucose_value} (выше на {deviation:.1f})\nВаша доза: {current_dose:.0f} ед.\n→ +2 ед.\n✅ Рекомендуемая доза: {recommended_dose:.0f} ед."
-    elif deviation <= -1.0:
-        adjustment = -2
-        recommended_dose = current_dose - 2
-        recommendation_text = f"Целевой сахар: {target}\nТекущий сахар: {glucose_value} (ниже на {abs(deviation):.1f})\nВаша доза: {current_dose:.0f} ед.\n→ -2 ед.\n✅ Рекомендуемая доза: {recommended_dose:.0f} ед."
-    else:
-        recommendation_text = f"Целевой сахар: {target}\nТекущий сахар: {glucose_value} (в пределах нормы)\nВаша доза: {current_dose:.0f} ед.\n→ без изменений\n✅ Рекомендуемая доза: {current_dose:.0f} ед."
-    
-    return {
-        "period": period,
-        "target": target,
-        "base_dose": base_dose,
-        "current_dose": current_dose,
-        "glucose_value": glucose_value,
-        "deviation": deviation,
-        "adjustment": adjustment,
-        "recommended_dose": recommended_dose,
-        "recommendation_text": recommendation_text,
-        "user_provided_dose": user_dose is not None
-    }
-
 # ==================== ПОЛУЧЕНИЕ ДАННЫХ ДЛЯ ПРОСМОТРА ====================
 async def get_patient_full_history(patient_id: int) -> str:
     """Возвращает полную историю замеров подопечного в текстовом формате"""
@@ -415,7 +345,7 @@ async def get_patient_full_history(patient_id: int) -> str:
         ''', patient_id)
         
         glucose_rows = await conn.fetch('''
-            SELECT date, time, period, glucose_value, glucose_type, comment, insulin_dose, insulin_recommendation
+            SELECT date, time, period, glucose_value, glucose_type, comment
             FROM glucose 
             WHERE user_id = $1 
             ORDER BY date DESC, time DESC
@@ -453,10 +383,6 @@ async def get_patient_full_history(patient_id: int) -> str:
                 result += f" ({row['glucose_type']})"
             if row['comment']:
                 result += f"\n   📝 {row['comment']}"
-            if row['insulin_dose']:
-                result += f"\n   💉 Доза: {float(row['insulin_dose'])} ед."
-            if row['insulin_recommendation']:
-                result += f"\n   📋 {row['insulin_recommendation']}"
             result += "\n"
         if len(glucose_rows) > 20:
             result += f"\n... и ещё {len(glucose_rows) - 20} записей\n"
@@ -485,14 +411,14 @@ async def generate_patient_excel(patient_id: int) -> str:
         ws_pressure.column_dimensions[col_letter].width = width
     ws_pressure.row_dimensions[1].height = 20
     
-    # Заголовки для глюкозы (с новыми столбцами для инсулина)
-    headers_glucose = ['Дата', 'Время', 'Период', 'Глюкоза', 'Тип замера', 'Комментарий', 'Доза инсулина', 'Рекомендация']
+    # Заголовки для глюкозы
+    headers_glucose = ['Дата', 'Время', 'Период', 'Глюкоза', 'Тип замера', 'Комментарий']
     for col, header in enumerate(headers_glucose, 1):
         cell = ws_glucose.cell(row=1, column=col, value=header)
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal='center', vertical='center')
     
-    col_widths_glucose = {'A': 12, 'B': 10, 'C': 8, 'D': 10, 'E': 25, 'F': 40, 'G': 15, 'H': 50}
+    col_widths_glucose = {'A': 12, 'B': 10, 'C': 8, 'D': 10, 'E': 25, 'F': 40}
     for col_letter, width in col_widths_glucose.items():
         ws_glucose.column_dimensions[col_letter].width = width
     ws_glucose.row_dimensions[1].height = 20
@@ -519,7 +445,7 @@ async def generate_patient_excel(patient_id: int) -> str:
         
         # Глюкоза
         rows = await conn.fetch('''
-            SELECT date, time, period, glucose_value, glucose_type, comment, insulin_dose, insulin_recommendation
+            SELECT date, time, period, glucose_value, glucose_type, comment
             FROM glucose 
             WHERE user_id = $1 
             ORDER BY date DESC, time DESC
@@ -533,8 +459,6 @@ async def generate_patient_excel(patient_id: int) -> str:
             ws_glucose.cell(row=row_num, column=4, value=float(row['glucose_value']))
             ws_glucose.cell(row=row_num, column=5, value=row['glucose_type'] if row['glucose_type'] else "")
             ws_glucose.cell(row=row_num, column=6, value=row['comment'] if row['comment'] else "")
-            ws_glucose.cell(row=row_num, column=7, value=float(row['insulin_dose']) if row['insulin_dose'] else "")
-            ws_glucose.cell(row=row_num, column=8, value=row['insulin_recommendation'] if row['insulin_recommendation'] else "")
             row_num += 1
     
     with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
@@ -574,20 +498,6 @@ def detect_glucose_type(text: str) -> str:
             return "натощак"
         return "без указания"
 
-def extract_insulin_dose(text: str) -> Optional[float]:
-    """Извлекает дозу инсулина из текста (формат: инсулин Xед или X ед)"""
-    patterns = [
-        r'инсулин\s*(\d+[.,]?\d*)\s*ед',
-        r'инсулин\s*(\d+[.,]?\d*)',
-        r'(\d+[.,]?\d*)\s*ед\s*инсулин',
-        r'(\d+[.,]?\d*)\s*ед'
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            return float(match.group(1).replace(',', '.'))
-    return None
-
 async def save_pressure_to_db(user_id: int, period: str, systolic: int, diastolic: int, pulse: int, comment: str) -> None:
     """Сохраняет показания давления в БД"""
     now = datetime.now(MSK_PLUS_1)
@@ -605,7 +515,7 @@ async def save_pressure_to_db(user_id: int, period: str, systolic: int, diastoli
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ''', user_id, date_val, time_val, period, systolic, diastolic, pulse, comment)
 
-async def save_glucose_to_db(user_id: int, period: str, glucose: float, glucose_type: str, comment: str, insulin_dose: Optional[float] = None, insulin_recommendation: Optional[str] = None) -> None:
+async def save_glucose_to_db(user_id: int, period: str, glucose: float, glucose_type: str, comment: str) -> None:
     """Сохраняет показания глюкозы в БД"""
     now = datetime.now(MSK_PLUS_1)
     
@@ -617,20 +527,10 @@ async def save_glucose_to_db(user_id: int, period: str, glucose: float, glucose_
     time_val = now.time()
     
     async with db_pool.acquire() as conn:
-        try:
-            await conn.execute('''
-                INSERT INTO glucose (user_id, date, time, period, glucose_value, glucose_type, comment, insulin_dose, insulin_recommendation)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ''', user_id, date_val, time_val, period, glucose, glucose_type, comment, insulin_dose, insulin_recommendation)
-        except Exception as e:
-            # Если столбцов нет - сохраняем без них
-            if 'column "insulin_dose" does not exist' in str(e) or 'column "insulin_recommendation" does not exist' in str(e):
-                await conn.execute('''
-                    INSERT INTO glucose (user_id, date, time, period, glucose_value, glucose_type, comment)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                ''', user_id, date_val, time_val, period, glucose, glucose_type, comment)
-            else:
-                raise e
+        await conn.execute('''
+            INSERT INTO glucose (user_id, date, time, period, glucose_value, glucose_type, comment)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ''', user_id, date_val, time_val, period, glucose, glucose_type, comment)
 
 async def get_today_pressure_report(user_id: int) -> str:
     """Возвращает отчёт по давлению за сегодня"""
@@ -667,7 +567,7 @@ async def get_today_glucose_report(user_id: int) -> str:
     
     async with db_pool.acquire() as conn:
         rows = await conn.fetch('''
-            SELECT date, time, period, glucose_value, glucose_type, comment, insulin_dose, insulin_recommendation
+            SELECT date, time, period, glucose_value, glucose_type, comment
             FROM glucose 
             WHERE user_id = $1 AND date = $2
             ORDER BY time ASC
@@ -686,10 +586,6 @@ async def get_today_glucose_report(user_id: int) -> str:
             report += f" ({row['glucose_type']})"
         if row['comment']:
             report += f"\n   📝 {row['comment']}"
-        if row['insulin_dose']:
-            report += f"\n   💉 Доза: {float(row['insulin_dose'])} ед."
-        if row['insulin_recommendation']:
-            report += f"\n   📋 {row['insulin_recommendation']}"
         report += "\n\n"
     
     return report
@@ -1052,10 +948,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📝 Форматы ввода глюкозы:\n"
         "• 5.5 - глюкоза (период определится автоматически)\n"
         "• 5.5 натощак - глюкоза с типом замера\n"
-        "• 5.5 через 2 часа после еды - глюкоза с типом замера\n"
-        "• 8.5 инсулин 10ед - глюкоза с дозой инсулина\n\n"
+        "• 5.5 через 2 часа после еды - глюкоза с типом замера\n\n"
         "🌅 Бот сам определит время суток (Утро, День, Вечер)\n"
-        "💉 Для глюкозы будет рассчитана рекомендация по инсулину\n"
         "💾 Все данные хранятся в защищённой базе данных\n\n"
         "📋 Команды наставника:\n"
         "/add_patient @username - добавить подопечного\n"
@@ -1084,13 +978,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Форматы ввода глюкозы:\n"
         "• 5.5 - глюкоза\n"
         "• 5.5 натощак - глюкоза с типом замера\n"
-        "• 5.5 через 2 часа после еды\n"
-        "• 8.5 инсулин 10ед - глюкоза с дозой инсулина\n\n"
-        "💉 Рекомендация по инсулину:\n"
-        "• Утро: цель 7.0, базовая доза 10 ед.\n"
-        "• Вечер: цель 13.0, базовая доза 8 ед.\n"
-        "• Если сахар выше цели на ≥1 → +2 ед.\n"
-        "• Если сахар ниже цели на ≥1 → -2 ед.\n\n"
+        "• 5.5 через 2 часа после еды\n\n"
         "Рекомендации по измерению глюкозы:\n"
         "• Утром натощак\n"
         "• Перед каждым приёмом пищи\n"
@@ -1167,9 +1055,6 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
     text = update.message.text.strip()
     text_lower = text.lower()
     
-    # Извлекаем дозу инсулина из текста
-    insulin_dose = extract_insulin_dose(text)
-    
     # Ищем все числа (включая десятичные)
     numbers = re.findall(r'\d+[.,]?\d*', text)
     numbers = [float(n.replace(',', '.')) for n in numbers]
@@ -1177,10 +1062,8 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
     # Формируем ответ для уведомления наставников
     response_value = ""
     
-    # Если есть упоминание инсулина или одно число 1-30 — это глюкоза
-    is_insulin = any(word in text_lower for word in ["инсулин", "инсулина", "ед", "единиц", "iu", "ме", "мед", "единица"])
-    
-    if is_insulin or (len(numbers) >= 1 and 1 <= numbers[0] <= 30):
+    # Если одно число 1-30 — это глюкоза
+    if len(numbers) >= 1 and 1 <= numbers[0] <= 30:
         # Это глюкоза
         glucose = None
         
@@ -1197,23 +1080,11 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
         
         # Удаляем числа и ключевые слова из комментария
         comment = re.sub(r'\d+[.,]?\d*', '', text)
-        comment = re.sub(r'инсулин|инсулина|ед|единиц|iu|ме|мед', '', comment, flags=re.IGNORECASE)
         comment = re.sub(r'натощак|через 2 часа после еды|перед едой|перед сном|ночью', '', comment, flags=re.IGNORECASE)
         comment = re.sub(r'[\s/]+', ' ', comment).strip()
         
-        # Рассчитываем рекомендацию по инсулину
-        insulin_rec = calculate_insulin_recommendation(period, glucose, insulin_dose)
-        
         # Сохраняем в БД
-        await save_glucose_to_db(
-            user_id, 
-            period, 
-            glucose, 
-            glucose_type, 
-            comment, 
-            insulin_rec['current_dose'], 
-            insulin_rec['recommendation_text']
-        )
+        await save_glucose_to_db(user_id, period, glucose, glucose_type, comment)
         
         period_emoji = {"Утро": "🌅", "День": "☀️", "Вечер": "🌙"}
         now = datetime.now(MSK_PLUS_1)
@@ -1221,15 +1092,12 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
         response_value = f"глюкоза {glucose}"
         if glucose_type != "без указания":
             response_value += f" ({glucose_type})"
-        if insulin_dose:
-            response_value += f", доза {insulin_dose} ед."
         
         # Формируем ответ
         response = f"✅ Записано! {period_emoji.get(period, '')} {period}: {response_value}\n"
         response += f"📅 {now.strftime('%d-%m-%Y %H:%M:%S')}\n"
         if comment:
             response += f"📝 {comment}\n"
-        response += f"\n💉 Рекомендация по инсулину:\n{insulin_rec['recommendation_text']}"
         
         await update.message.reply_text(response)
         
@@ -1258,7 +1126,6 @@ async def handle_pressure_glucose(update: Update, context: ContextTypes.DEFAULT_
             "120 80 - давление\n"
             "120 80 68 - давление и пульс\n"
             "5.5 - глюкоза\n"
-            "8.5 инсулин 10ед - глюкоза с дозой инсулина\n"
             "120 80 выпил таблетку - с комментарием"
         )
         return
@@ -1355,8 +1222,7 @@ async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
                          "• 120 80 - давление\n"
                          "• 120 80 68 - давление и пульс\n"
                          "• 5.5 - глюкоза\n"
-                         "• 5.5 натощак - глюкоза с типом замера\n"
-                         "• 8.5 инсулин 10ед - глюкоза с дозой инсулина"
+                         "• 5.5 натощак - глюкоза с типом замера"
                 )
                 sent_count += 1
                 print(f"  → Напоминание отправлено пользователю {uid}")
